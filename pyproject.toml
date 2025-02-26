@@ -1,0 +1,26 @@
+[project]
+name = "idgaz"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "killian31",email = "80256683+killian31@users.noreply.github.com"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy (==1.26.4)",
+    "pandas (>=2.2.3,<3.0.0)",
+    "seaborn (>=0.13.2,<0.14.0)",
+    "matplotlib (>=3.10.0,<4.0.0)",
+    "missingno (>=0.5.2,<0.6.0)",
+    "ipykernel (>=6.29.5,<7.0.0)",
+    "tqdm (>=4.67.1,<5.0.0)",
+    "scikit-learn (>=1.6.1,<2.0.0)",
+    "xgboost (>=2.1.4,<3.0.0)",
+    "torch (==2.2.2)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

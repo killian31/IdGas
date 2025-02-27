@@ -2,9 +2,13 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler, StandardScaler
 from torch.utils.data import DataLoader
 
+
+"""
+23 régressions. Tester ACP mais en la calculant sur concat(train, test). Essayer même ACP sur test que celle utilisée pour train.
+"""
 
 def preprocess_data(df):
     """
@@ -44,6 +48,75 @@ def preprocess_data(df):
     return df_transformed
 
 
+def preprocess_data_2(df, cap_quantiles=(0.01, 0.99)):
+    df = df.copy()
+    num_cols = [c for c in df.columns if c not in ["ID", "Humidity"]]
+    for c in num_cols:
+        low = df[c].quantile(cap_quantiles[0])
+        high = df[c].quantile(cap_quantiles[1])
+        df[c] = np.clip(df[c], low, high)
+    m12_15 = ["M12", "M13", "M14", "M15"]
+    rs = RobustScaler()
+    df[m12_15] = rs.fit_transform(df[m12_15])
+    log_cols = ["M4", "M5", "M6", "M7", "R", "S1", "S2", "S3"]
+    df[log_cols] = np.sign(df[log_cols]) * np.log1p(np.abs(df[log_cols]))
+    ss = StandardScaler()
+    df[log_cols] = ss.fit_transform(df[log_cols])
+    return df
+
+
+def augment_data(
+    df,
+    humidity_col="Humidity",
+    sensor_cols=None,
+    target_humidity_range=(0.0, 1.2),
+    n_copies=1,
+    noise_std=0.05,
+):
+    """
+    Creates augmented samples by:
+      1) Randomly scaling humidity into a target range.
+      2) Adjusting sensor values accordingly with small random noise.
+
+    df: input DataFrame
+    humidity_col: name of the humidity column
+    sensor_cols: list of sensor columns to modify
+    target_humidity_range: range of humidity to sample from
+    n_copies: how many augmented copies per original row
+    noise_std: std dev of Gaussian noise added to sensor columns
+
+    Returns: original df appended with new augmented rows
+    """
+    if sensor_cols is None:
+        # Exclude ID and label columns if present
+        sensor_cols = [c for c in df.columns if c not in [humidity_col, "ID"]]
+
+    augmented_rows = []
+    for _ in range(n_copies):
+        # Copy the original data
+        df_aug = df.copy()
+
+        # Sample new humidity scalars
+        original_hum = df_aug[humidity_col].values
+        # e.g., uniform sampling within a broader range:
+        new_hum = np.random.uniform(*target_humidity_range, size=len(df_aug))
+
+        # Compute ratio
+        ratio = (new_hum + 1e-8) / (original_hum + 1e-8)
+
+        # Scale sensor values by ratio^(some factor) + noise
+        for c in sensor_cols:
+            df_aug[c] = df_aug[c].values * ratio**0.5  # example mild effect
+            df_aug[c] += np.random.normal(0, noise_std, size=len(df_aug))
+
+        df_aug[humidity_col] = new_hum
+        augmented_rows.append(df_aug)
+
+    # Concatenate augmented data
+    df_out = pd.concat([df] + augmented_rows, ignore_index=True)
+    return df_out
+
+
 def group_measures(df, verbose=True):
     """
     Groups M12 to M15 into a single measure, M4 to M7 into 2 variables using PCA.
@@ -76,7 +149,9 @@ def group_measures(df, verbose=True):
     return df_grouped
 
 
-def full_pipeline(filename_x, filename_y, val_proportion=0.2, reduce_features=True):
+def full_pipeline(
+    filename_x, filename_y, val_proportion=0.2, reduce_features=False, augment=True
+):
     """
     Full pipeline function that:
       - Loads feature and label CSV files.
@@ -88,6 +163,8 @@ def full_pipeline(filename_x, filename_y, val_proportion=0.2, reduce_features=Tr
       filename_x (str): Path to the features CSV file.
       filename_y (str): Path to the labels CSV file.
       val_proportion (float): Proportion of data to reserve for validation.
+      reduce_features (bool): If True, reduces the number of features using PCA.
+      augment (bool):
 
     Returns:
       x_train, y_train, x_val, y_val: DataFrames for training and validation.
@@ -95,10 +172,33 @@ def full_pipeline(filename_x, filename_y, val_proportion=0.2, reduce_features=Tr
     df_x = pd.read_csv(filename_x)
     df_y = pd.read_csv(filename_y)
 
-    df_x_processed = preprocess_data(df_x)
+    df_x_processed = preprocess_data_2(df_x)
 
     if reduce_features:
         df_x_processed = group_measures(df_x_processed)
+
+    if augment:
+        df_x_processed = augment_data(
+            df_x_processed,
+            humidity_col="Humidity",
+            sensor_cols=[
+                "M4",
+                "M5",
+                "M6",
+                "M7",
+                "R",
+                "S1",
+                "S2",
+                "S3",
+                "M12",
+                "M13",
+                "M14",
+                "M15",
+            ],
+            target_humidity_range=(0.0, 1.2),
+            n_copies=1,
+            noise_std=0.02,
+        )
 
     df_merged = pd.merge(df_x_processed, df_y, on="ID")
 
@@ -133,13 +233,13 @@ def splits_to_dataloaders(x_train, y_train, x_val, y_val, batch_size=32, num_wor
     if "ID" in y_val.columns:
         y_val = y_val.drop(columns=["ID"])
     train_loader = DataLoader(
-        list(zip(x_train.values.astype('float32'), y_train.values.astype('float32'))),
+        list(zip(x_train.values.astype("float32"), y_train.values.astype("float32"))),
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
     )
     val_loader = DataLoader(
-        list(zip(x_val.values.astype('float32'), y_val.values.astype('float32'))),
+        list(zip(x_val.values.astype("float32"), y_val.values.astype("float32"))),
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,

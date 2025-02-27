@@ -30,7 +30,7 @@ def train_xgboost(x_train, y_train, params=None):
             "scale_pos_weight": 1,
             "process_type": "default",
             "predictor": "cpu_predictor",
-            "grow_policy": "depthwise"  # Changed from 'lossguide' for better memory usage
+            "grow_policy": "depthwise",  # Changed from 'lossguide' for better memory usage
         }
     base_estimator = xgb.XGBRegressor(**params)
     model = MultiOutputRegressor(base_estimator)
@@ -56,6 +56,8 @@ def run_experiment(x_train, y_train, x_val, y_val, params=None):
       model: Trained MultiOutputRegressor with XGBRegressor.
     """
     model = train_xgboost(x_train, y_train, params=params)
-    metric = evaluate_model(model, x_val, y_val)
-    print("Validation Weighted RMSE (XGBoost): {:.4f}".format(metric))
+    metric_train = evaluate_model(model, x_train, y_train)
+    metric_val = evaluate_model(model, x_val, y_val)
+    print("Training Weighted RMSE (XGBoost): {:.4f}".format(metric_train))
+    print("Validation Weighted RMSE (XGBoost): {:.4f}".format(metric_val))
     return model

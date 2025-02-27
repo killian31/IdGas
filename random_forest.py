@@ -44,6 +44,8 @@ def run_experiment(x_train, y_train, x_val, y_val, params=None):
       model: Trained RandomForestRegressor.
     """
     model = train_random_forest(x_train, y_train, params=params)
-    metric = evaluate_model(model, x_val, y_val)
-    print("Validation Weighted RMSE: {:.4f}".format(metric))
+    metric_train = evaluate_model(model, x_train, y_train)
+    metric_val = evaluate_model(model, x_val, y_val)
+    print("Training Weighted RMSE: {:.4f}".format(metric_train))
+    print("Validation Weighted RMSE: {:.4f}".format(metric_val))
     return model

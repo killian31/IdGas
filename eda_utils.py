@@ -92,3 +92,40 @@ def plot_feature_target_correlations(features_df, target_df, figsize=(12, 10)):
     plt.show()
 
     return corr_df
+
+
+def find_value_intervals(df, proportion=0.99, print_results=True):
+    """
+    Returns, for each numeric column in df, the [lower, upper] interval
+    that captures the specified proportion (default 99%) of the data.
+    For example, proportion=0.99 returns the central 99% interval.
+
+    Parameters:
+    -----------
+    df : pandas DataFrame
+        The input dataframe.
+    proportion : float, optional
+        Proportion of data to capture in the interval (between 0 and 1).
+
+    Returns:
+    --------
+    intervals : dict
+        A dictionary where each key is a column name and the value is a tuple
+        (lower_bound, upper_bound).
+    """
+    intervals = {}
+    # Example: proportion=0.99 -> lower_q=0.005, upper_q=0.995
+    lower_q = (1 - proportion) / 2
+    upper_q = 1 - lower_q
+
+    for col in df.select_dtypes(include=["float", "int"]).columns:
+        lower_bound = df[col].quantile(lower_q)
+        upper_bound = df[col].quantile(upper_q)
+        intervals[col] = (lower_bound, upper_bound)
+        if print_results:
+            print(
+                f"{proportion*100:.0f}% of the {col} values are in the interval [{lower_bound:.2f}, {upper_bound:.2f}]"
+            )
+            print(f"Min: {df[col].min():.2f}, Max: {df[col].max():.2f}")
+
+    return intervals

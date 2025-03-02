@@ -4,11 +4,8 @@ from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import RobustScaler, StandardScaler
 from torch.utils.data import DataLoader
+from feature_engineering import apply_feature_engineering
 
-
-"""
-23 régressions. Tester ACP mais en la calculant sur concat(train, test). Essayer même ACP sur test que celle utilisée pour train.
-"""
 
 def preprocess_data(df):
     """
@@ -150,21 +147,31 @@ def group_measures(df, verbose=True):
 
 
 def full_pipeline(
-    filename_x, filename_y, val_proportion=0.2, reduce_features=False, augment=True
+    filename_x, filename_y, val_proportion=0.2, reduce_features=False, augment=False,
+    apply_feat_eng=True, polynomial_degree=2, include_group_interactions=True,
+    include_humidity_interactions=True, feature_selection=True, k_features=20
 ):
     """
     Full pipeline function that:
       - Loads feature and label CSV files.
       - Preprocesses the features.
+      - Applies feature engineering (optional).
       - Merges features and labels on 'ID'.
       - Splits the data into training and validation sets.
+      - Applies data augmentation only to the training set if requested.
 
     Parameters:
       filename_x (str): Path to the features CSV file.
       filename_y (str): Path to the labels CSV file.
       val_proportion (float): Proportion of data to reserve for validation.
       reduce_features (bool): If True, reduces the number of features using PCA.
-      augment (bool):
+      augment (bool): If True, augments data with synthetic samples (only applied to training data).
+      apply_feat_eng (bool): If True, applies feature engineering techniques.
+      polynomial_degree (int): Degree for polynomial features.
+      include_group_interactions (bool): Whether to include sensor group interactions.
+      include_humidity_interactions (bool): Whether to include humidity interactions.
+      feature_selection (bool): Whether to perform feature selection.
+      k_features (int): Number of features to select if feature_selection is True.
 
     Returns:
       x_train, y_train, x_val, y_val: DataFrames for training and validation.
@@ -177,9 +184,38 @@ def full_pipeline(
     if reduce_features:
         df_x_processed = group_measures(df_x_processed)
 
-    if augment:
-        df_x_processed = augment_data(
+     # Apply feature engineering if requested
+    if apply_feat_eng:
+        df_x_processed = apply_feature_engineering(
             df_x_processed,
+            target_df=df_y,
+            polynomial_degree=polynomial_degree,
+            include_group_interactions=include_group_interactions,
+            include_humidity_interactions=include_humidity_interactions,
+            feature_selection=feature_selection,
+            k_features=k_features
+        )
+        
+    df_merged = pd.merge(df_x_processed, df_y, on="ID")
+
+    target_columns = [col for col in df_y.columns if col != "ID"]
+    feature_columns = [col for col in df_x_processed.columns if col != "ID"]
+
+    X = df_merged[["ID"] + feature_columns]
+    y = df_merged[target_columns]
+
+    x_train, x_val, y_train, y_val = train_test_split(
+        X, y, test_size=val_proportion, random_state=29
+    )
+    
+    # Apply data augmentation only to the training set if requested
+    if augment:
+        # Extract features without ID for augmentation
+        train_features = x_train.drop(columns=["ID"]) if "ID" in x_train.columns else x_train.copy()
+        
+        # Augment only the training features
+        augmented_features = augment_data(
+            train_features,
             humidity_col="Humidity",
             sensor_cols=[
                 "M4",
@@ -199,18 +235,19 @@ def full_pipeline(
             n_copies=1,
             noise_std=0.02,
         )
-
-    df_merged = pd.merge(df_x_processed, df_y, on="ID")
-
-    target_columns = [col for col in df_y.columns if col != "ID"]
-    feature_columns = [col for col in df_x_processed.columns if col != "ID"]
-
-    X = df_merged[["ID"] + feature_columns]
-    y = df_merged[target_columns]
-
-    x_train, x_val, y_train, y_val = train_test_split(
-        X, y, test_size=val_proportion, random_state=29
-    )
+        
+        # Generate new IDs for augmented data if needed
+        if "ID" in x_train.columns:
+            max_id = x_train["ID"].max()
+            new_ids = pd.DataFrame({"ID": range(max_id + 1, max_id + 1 + len(augmented_features) - len(train_features))})
+            augmented_features = pd.concat([new_ids, augmented_features], axis=1)
+        
+        # Create corresponding labels for augmented data (copy original labels)
+        augmented_labels = pd.concat([y_train] * 2, ignore_index=True)[len(y_train):]
+        
+        # Combine original and augmented data
+        x_train = pd.concat([x_train, augmented_features], ignore_index=True)
+        y_train = pd.concat([y_train, augmented_labels], ignore_index=True)
 
     return x_train, y_train, x_val, y_val
 

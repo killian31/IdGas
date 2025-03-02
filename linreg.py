@@ -3,6 +3,7 @@ import pandas as pd
 from sklearn.linear_model import LinearRegression
 import statsmodels.api as sm
 from sklearn.base import BaseEstimator, RegressorMixin
+from tqdm import tqdm
 
 from utils import evaluate_model
 
@@ -61,7 +62,7 @@ class SelectiveLinearRegressor(BaseEstimator, RegressorMixin):
             y_array = y
             
         # Fit a model for each target variable
-        for i in range(y_array.shape[1]):
+        for i in tqdm(range(y_array.shape[1])):
             # Get the current target
             y_i = y_array[:, i]
             
@@ -111,9 +112,12 @@ class SelectiveLinearRegressor(BaseEstimator, RegressorMixin):
         predictions = np.zeros((X_array.shape[0], len(self.models)))
         
         # Generate predictions for each target variable
+        pbar = tqdm(total=len(self.models))
         for i, (model, selected) in enumerate(zip(self.models, self.selected_features)):
             X_selected = X_array[:, selected]
             predictions[:, i] = model.predict(X_selected)
+            pbar.update(1)
+        pbar.close()
             
         return predictions
     

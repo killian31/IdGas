@@ -146,14 +146,44 @@ def group_measures(df, verbose=True):
     return df_grouped
 
 
+def remove_outliers_iqr(df, columns, k=1.5):
+    """
+    Remove outliers from specified columns using the IQR method.
+    k: multiplier for IQR range (default 1.5 for mild outliers)
+    """
+    df_clean = df.copy()
+    for col in columns:
+        Q1 = df_clean[col].quantile(0.25)
+        Q3 = df_clean[col].quantile(0.75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - k * IQR
+        upper_bound = Q3 + k * IQR
+        df_clean = df_clean[
+            (df_clean[col] >= lower_bound) & (df_clean[col] <= upper_bound)
+        ]
+    return df_clean
+
+
 def full_pipeline(
-    filename_x, filename_y, val_proportion=0.2, reduce_features=False, augment=False,
-    apply_feat_eng=True, polynomial_degree=2, include_group_interactions=True,
-    include_humidity_interactions=True, feature_selection=True, k_features=20
+    filename_x,
+    filename_y,
+    val_proportion=0.2,
+    reduce_features=False,
+    augment=False,
+    apply_feat_eng=True,
+    polynomial_degree=2,
+    include_group_interactions=True,
+    include_humidity_interactions=True,
+    feature_selection=True,
+    k_features=20,
+    remove_outliers=False,
+    remove_humidity=False,
 ):
     """
     Full pipeline function that:
       - Loads feature and label CSV files.
+      - Removes Humidity column if requested.
+      - Removes outliers if requested (using IQR method).
       - Preprocesses the features.
       - Applies feature engineering (optional).
       - Merges features and labels on 'ID'.
@@ -172,6 +202,8 @@ def full_pipeline(
       include_humidity_interactions (bool): Whether to include humidity interactions.
       feature_selection (bool): Whether to perform feature selection.
       k_features (int): Number of features to select if feature_selection is True.
+      remove_outliers (bool): If True, removes outliers using IQR method before preprocessing.
+      remove_humidity (bool): If True, removes the Humidity column from the dataset.
 
     Returns:
       x_train, y_train, x_val, y_val: DataFrames for training and validation.
@@ -179,12 +211,35 @@ def full_pipeline(
     df_x = pd.read_csv(filename_x)
     df_y = pd.read_csv(filename_y)
 
+    if remove_humidity:
+        df_x = df_x.drop("Humidity", axis=1)
+
+    # Remove outliers if requested
+    if remove_outliers:
+        sensor_cols = [
+            "M4",
+            "M5",
+            "M6",
+            "M7",
+            "M12",
+            "M13",
+            "M14",
+            "M15",
+            "R",
+            "S1",
+            "S2",
+            "S3",
+        ]
+        df_x = remove_outliers_iqr(df_x, sensor_cols)
+        # Keep only corresponding rows in df_y
+        df_y = df_y[df_y["ID"].isin(df_x["ID"])]
+
     df_x_processed = preprocess_data_2(df_x)
 
     if reduce_features:
         df_x_processed = group_measures(df_x_processed)
 
-     # Apply feature engineering if requested
+    # Apply feature engineering if requested
     if apply_feat_eng:
         df_x_processed = apply_feature_engineering(
             df_x_processed,
@@ -193,9 +248,9 @@ def full_pipeline(
             include_group_interactions=include_group_interactions,
             include_humidity_interactions=include_humidity_interactions,
             feature_selection=feature_selection,
-            k_features=k_features
+            k_features=k_features,
         )
-        
+
     df_merged = pd.merge(df_x_processed, df_y, on="ID")
 
     target_columns = [col for col in df_y.columns if col != "ID"]
@@ -207,12 +262,14 @@ def full_pipeline(
     x_train, x_val, y_train, y_val = train_test_split(
         X, y, test_size=val_proportion, random_state=29
     )
-    
+
     # Apply data augmentation only to the training set if requested
     if augment:
         # Extract features without ID for augmentation
-        train_features = x_train.drop(columns=["ID"]) if "ID" in x_train.columns else x_train.copy()
-        
+        train_features = (
+            x_train.drop(columns=["ID"]) if "ID" in x_train.columns else x_train.copy()
+        )
+
         # Augment only the training features
         augmented_features = augment_data(
             train_features,
@@ -235,16 +292,23 @@ def full_pipeline(
             n_copies=1,
             noise_std=0.02,
         )
-        
+
         # Generate new IDs for augmented data if needed
         if "ID" in x_train.columns:
             max_id = x_train["ID"].max()
-            new_ids = pd.DataFrame({"ID": range(max_id + 1, max_id + 1 + len(augmented_features) - len(train_features))})
+            new_ids = pd.DataFrame(
+                {
+                    "ID": range(
+                        max_id + 1,
+                        max_id + 1 + len(augmented_features) - len(train_features),
+                    )
+                }
+            )
             augmented_features = pd.concat([new_ids, augmented_features], axis=1)
-        
+
         # Create corresponding labels for augmented data (copy original labels)
-        augmented_labels = pd.concat([y_train] * 2, ignore_index=True)[len(y_train):]
-        
+        augmented_labels = pd.concat([y_train] * 2, ignore_index=True)[len(y_train) :]
+
         # Combine original and augmented data
         x_train = pd.concat([x_train, augmented_features], ignore_index=True)
         y_train = pd.concat([y_train, augmented_labels], ignore_index=True)

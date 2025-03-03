@@ -7,8 +7,11 @@ from tqdm import tqdm
 from data_preprocessing import splits_to_dataloaders
 from residual_attention_net import RAMTNet
 
+
 class NNRegressor(nn.Module):
-    def __init__(self, hidden_dim=128, num_output=23, bias=True, dropout_rate=0.3, **kwargs):
+    def __init__(
+        self, hidden_dim=128, num_output=23, bias=True, dropout_rate=0.3, **kwargs
+    ):
         super(NNRegressor, self).__init__()
         self.fc_M10 = nn.Linear(5, 4, bias=bias)
         self.bn_M10 = nn.BatchNorm1d(4)
@@ -103,9 +106,7 @@ class GasDetectionModel(nn.Module):
 
         # Process each sensor group with humidity conditioning
         m12_15_feat = self.m12_15_encoder(m12_15)
-        m12_15_feat = m12_15_feat * torch.sigmoid(
-            self.m12_15_cond(h_encoding)
-        )
+        m12_15_feat = m12_15_feat * torch.sigmoid(self.m12_15_cond(h_encoding))
 
         m4_7_feat = self.m4_7_encoder(m4_7)
         m4_7_feat = m4_7_feat * torch.sigmoid(self.m4_7_cond(h_encoding))
@@ -133,7 +134,7 @@ class GatedSensorBlock(nn.Module):
         # Gate that modulates by humidity
         self.lin_humidity = nn.Linear(1, out_features, bias=False)
         self.bn_out = nn.BatchNorm1d(out_features)
-        
+
     def forward(self, sensors, humidity):
         # sensors: (batch, in_features)
         # humidity: (batch, 1)
@@ -153,19 +154,19 @@ class NNRegressorV2(nn.Module):
         self.block_M10 = GatedSensorBlock(in_features=4, out_features=16)
         # R, S1, S2, S3 block
         self.block_RS = GatedSensorBlock(in_features=4, out_features=16)
-        
+
         # After gating
-        self.fc_fuse1 = nn.Linear(16*3, hidden_dim)
+        self.fc_fuse1 = nn.Linear(16 * 3, hidden_dim)
         self.bn_fuse1 = nn.BatchNorm1d(hidden_dim)
-        self.fc_fuse2 = nn.Linear(hidden_dim, hidden_dim//2)
-        self.bn_fuse2 = nn.BatchNorm1d(hidden_dim//2)
-        self.regressor = nn.Linear(hidden_dim//2, 23)
-        
+        self.fc_fuse2 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.bn_fuse2 = nn.BatchNorm1d(hidden_dim // 2)
+        self.regressor = nn.Linear(hidden_dim // 2, 23)
+
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x):
         """
-        x shape: (batch_size, 13) 
+        x shape: (batch_size, 13)
         Let's define:
          x[:,0] = Humidity
          x[:,1:5] = M12, M13, M14, M15
@@ -176,18 +177,18 @@ class NNRegressorV2(nn.Module):
         M12_15 = x[:, 1:5]
         M4_7 = x[:, 5:9]
         R_S1S2S3 = x[:, 9:13]
-        
+
         out_M0 = self.block_M0(M4_7, humidity)
         out_M10 = self.block_M10(M12_15, humidity)
         out_RS = self.block_RS(R_S1S2S3, humidity)
-        
+
         # Fuse
         fused = torch.cat([out_M0, out_M10, out_RS], dim=1)
         fused = self.bn_fuse1(F.relu(self.fc_fuse1(fused)))
         fused = self.dropout(fused)
         fused = self.bn_fuse2(F.relu(self.fc_fuse2(fused)))
         fused = self.dropout(fused)
-        
+
         out = torch.sigmoid(self.regressor(fused))
         return out
 
@@ -196,11 +197,11 @@ class NNRegressorV2(nn.Module):
         M12_15 = x[:, 1:5]
         M4_7 = x[:, 5:9]
         R_S1S2S3 = x[:, 9:13]
-        
+
         out_M0 = self.block_M0(M4_7, humidity)
         out_M10 = self.block_M10(M12_15, humidity)
         out_RS = self.block_RS(R_S1S2S3, humidity)
-        
+
         fused = torch.cat([out_M0, out_M10, out_RS], dim=1)
 
         fused = self.bn_fuse1(F.relu(self.fc_fuse1(fused)))
@@ -208,13 +209,21 @@ class NNRegressorV2(nn.Module):
         return fused
 
 
-
 class BasicDeepRegressor(nn.Module):
     """
-    Basic network that takes a k-dimensional input features vector and 
+    Basic network that takes a k-dimensional input features vector and
     outputs multiple values.
     """
-    def __init__(self, input_dim, output_dim, hidden_layers, dropout_rate, activation="relu", activation_out="sigmoid"):
+
+    def __init__(
+        self,
+        input_dim,
+        output_dim,
+        hidden_layers,
+        dropout_rate,
+        activation="relu",
+        activation_out="sigmoid",
+    ):
         super(BasicDeepRegressor, self).__init__()
         if activation == "relu":
             self.activation = nn.ReLU()
@@ -235,10 +244,11 @@ class BasicDeepRegressor(nn.Module):
         self.layers.append(nn.Linear(input_dim, hidden_layers[0]))
         self.layers.append(self.activation)
         for i in range(len(hidden_layers) - 1):
-            self.layers.append(nn.Linear(hidden_layers[i], hidden_layers[i+1]))
+            self.layers.append(nn.Linear(hidden_layers[i], hidden_layers[i + 1]))
             self.layers.append(self.activation)
         # Output layer
         self.regressor = nn.Linear(hidden_layers[-1], output_dim)
+
     def forward(self, x):
         for layer in self.layers:
             x = layer(x)
@@ -246,6 +256,7 @@ class BasicDeepRegressor(nn.Module):
         x = self.regressor(x)
         x = self.activation_out(x)
         return x
+
 
 class WeightedRMSELoss(nn.Module):
     def __init__(self):
@@ -333,7 +344,9 @@ def run_experiment(
     elif params["model_class"] == "RAMTNet":
         model = RAMTNet(**model_params)
     else:
-        raise NotImplementedError(f"Model class '{params["model_class"]}' not implemented")
+        raise NotImplementedError(
+            f"Model class '{params["model_class"]}' not implemented"
+        )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     optimizer = torch.optim.AdamW(
@@ -342,14 +355,20 @@ def run_experiment(
         weight_decay=training_params["weight_decay"],
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=training_params["factor"], patience=training_params["patience"], min_lr=training_params["min_lr"]
+        optimizer,
+        mode="min",
+        factor=training_params["factor"],
+        patience=training_params["patience"],
+        min_lr=training_params["min_lr"],
     )
     if training_params["loss"] == "WeightedRMSELoss":
         criterion = WeightedRMSELoss()
     elif training_params["loss"] == "MSELoss":
         criterion = nn.MSELoss()
     else:
-        raise NotImplementedError(f"Loss function '{training_params['loss']}' not implemented")
+        raise NotImplementedError(
+            f"Loss function '{training_params['loss']}' not implemented"
+        )
     if verbose:
         print(
             "Number of trainable parameters:",

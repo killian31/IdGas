@@ -56,7 +56,7 @@ class SelfAttentionBlock(nn.Module):
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x):
-        x = x.transpose(0, 1)
+        x = x.transpose(0, 1)  # (b, 13, 16) -> (13, b, 16) for multihead attention
         attn_output, _ = self.multihead_attn(x, x, x)
         x = x + self.dropout(attn_output)
         x = self.layer_norm(x)
@@ -149,13 +149,13 @@ class RAMTNet(nn.Module):
         )
 
     def forward(self, x):
-        x = self.embedding(x)
-        x = self.attention(x)
-        x = x.transpose(1, 2)
-        x = self.pool(x).squeeze(-1)
-        x = self.shared_fc(x)
+        x = self.embedding(x)  # (b, 13, 16)
+        x = self.attention(x)  # (b, 13, 16)
+        x = x.transpose(1, 2)  # (b, 16, 13)
+        x = self.pool(x).squeeze(-1)  # (b, 16) pool over the sequence dimension
+        x = self.shared_fc(x)  # (b, 128)
         x = self.relu(x)
         x = self.dropout(x)
-        x = self.res_blocks(x)
-        x = self.multitask_head(x)
+        x = self.res_blocks(x)  # (b, 128)
+        x = self.multitask_head(x)  # (b, 23)
         return x

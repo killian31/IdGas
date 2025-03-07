@@ -1,6 +1,6 @@
 import numpy as np
 from sklearn.base import BaseEstimator
-from sklearn.ensemble import RandomForestClassifier#, RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier  # , RandomForestRegressor
 from xgboost import XGBRegressor
 from utils import evaluate_model
 
@@ -27,7 +27,7 @@ class TwoStageRandomForest(BaseEstimator):
         self.reg_params = reg_params if reg_params is not None else {}
         self.clf = RandomForestClassifier(**self.clf_params)
         self.reg = XGBRegressor(**self.reg_params)
-        #RandomForestRegressor(**self.reg_params)
+        # RandomForestRegressor(**self.reg_params)
 
     def fit(self, X, y):
         """
@@ -48,7 +48,8 @@ class TwoStageRandomForest(BaseEstimator):
         self.clf.fit(X, y_classif)
         # Ensure y_reg is a 1D array.
         y_reg = np.ravel(y_reg)
-        self.reg.fit(X, y_reg)
+        sample_weight = np.where(y_reg > 0.5, 1.2, 1.0)
+        self.reg.fit(X, y_reg, sample_weight=sample_weight)
         return self
 
     def predict(self, X):
@@ -154,7 +155,9 @@ def run_experiment(
     print(f"Training Weighted RMSE: {metric_train:.4f}")
     print(f"Validation Weighted RMSE: {metric_val:.4f}")
     # compute accuracy of multilabel classifier
-    y_pred = model.clf.predict(x_val.drop("ID", axis=1) if "ID" in x_val.columns else x_val)
+    y_pred = model.clf.predict(
+        x_val.drop("ID", axis=1) if "ID" in x_val.columns else x_val
+    )
     accuracy = np.mean(y_pred == y_val_classif)
     print(f"Validation Accuracy of Classifier: {accuracy:.4f}")
 

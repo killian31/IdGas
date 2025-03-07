@@ -735,66 +735,72 @@ def run_experiment(
         val_losses_all = [[] for _ in range(len(val_loaders))]
 
     criterion_val = WeightedRMSELoss()
-    for epoch in range(training_params["n_epochs"]):
-        if uda:
-            train_loss, disc_loss, reg_loss, disc_acc = train_nn_regressor_uda(
-                model,
-                domain_disc,
-                grl,
-                source_loader,
-                target_loader,
-                optimizer,
-                optimizer_disc,
-                criterion,
-                domain_criterion,
-                lambda_domain,
-                device,
-            )
-        else:
-            train_loss = train_nn_regressor(
-                model, source_loader, optimizer, criterion, device
-            )
+    try:
+        for epoch in range(training_params["n_epochs"]):
+            if uda:
+                train_loss, disc_loss, reg_loss, disc_acc = train_nn_regressor_uda(
+                    model,
+                    domain_disc,
+                    grl,
+                    source_loader,
+                    target_loader,
+                    optimizer,
+                    optimizer_disc,
+                    criterion,
+                    domain_criterion,
+                    lambda_domain,
+                    device,
+                )
+            else:
+                train_loss = train_nn_regressor(
+                    model, source_loader, optimizer, criterion, device
+                )
 
-        # Track validation losses for all validation sets
-        val_losses = []
-        for i, val_loader in enumerate(val_loaders):
-            val_loss = evaluate_nn_regressor(model, val_loader, criterion_val, device)
-            val_losses.append(val_loss)
+            # Track validation losses for all validation sets
+            val_losses = []
+            for i, val_loader in enumerate(val_loaders):
+                val_loss = evaluate_nn_regressor(
+                    model, val_loader, criterion_val, device
+                )
+                val_losses.append(val_loss)
+                if plot_losses:
+                    val_losses_all[i].append(val_loss)
+
+            # Calculate mean validation loss for scheduler
+            mean_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
+
+            # Update scheduler with mean validation loss
+            scheduler.step(mean_val_loss)
+
             if plot_losses:
-                val_losses_all[i].append(val_loss)
+                if uda:
+                    train_losses.append(reg_loss)
+                else:
+                    train_losses.append(train_loss)
 
-        # Calculate mean validation loss for scheduler
-        mean_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
-
-        # Update scheduler with mean validation loss
-        scheduler.step(mean_val_loss)
-
-        if plot_losses:
-            if uda:
-                train_losses.append(reg_loss)
-            else:
-                train_losses.append(train_loss)
-
+            if verbose:
+                if uda:
+                    pbar.set_description(
+                        f"Epoch {epoch+1}/{training_params['n_epochs']} - Train Disc Acc: {disc_acc*100:.2f}%, Train Disc Loss: {disc_loss:.4f}, Train Reg Loss: {reg_loss:.4f}, Train Loss: {train_loss:.4f}, Val Loss: {mean_val_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
+                    )
+                else:
+                    pbar.set_description(
+                        f"Epoch {epoch+1}/{training_params['n_epochs']} - Train Loss: {train_loss:.4f}, Val Loss: {mean_val_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
+                    )
+                pbar.update(1)
+    except KeyboardInterrupt:
+        print("Training interrupted by user.")
+    finally:
         if verbose:
-            if uda:
-                pbar.set_description(
-                    f"Epoch {epoch+1}/{training_params['n_epochs']} - Train Disc Acc: {disc_acc*100:.2f}%, Train Disc Loss: {disc_loss:.4f}, Train Reg Loss: {reg_loss:.4f}, Train Loss: {train_loss:.4f}, Val Loss: {mean_val_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
+            pbar.close()
+            if len(valsets) == 1:
+                final_val_rmse = evaluate_nn_regressor(
+                    model, val_loaders[0], criterion_val, device
                 )
-            else:
-                pbar.set_description(
-                    f"Epoch {epoch+1}/{training_params['n_epochs']} - Train Loss: {train_loss:.4f}, Val Loss: {mean_val_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
-                )
-            pbar.update(1)
-    if verbose:
-        pbar.close()
-        if len(valsets) == 1:
-            final_val_rmse = evaluate_nn_regressor(
-                model, val_loaders[0], criterion_val, device
-            )
-            print(f"Final Validation Weighted RMSE: {final_val_rmse:.4f}")
-    if plot_losses:
-        plot_loss(train_losses, val_losses_all, labels)
-    return model
+                print(f"Final Validation Weighted RMSE: {final_val_rmse:.4f}")
+        if plot_losses:
+            plot_loss(train_losses, val_losses_all, labels)
+        return model
 
 
 def submit_nn(

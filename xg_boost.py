@@ -1,5 +1,6 @@
 import xgboost as xgb
 from sklearn.multioutput import MultiOutputRegressor
+import numpy as np
 from tqdm import tqdm
 import itertools
 from utils import evaluate_model
@@ -36,7 +37,8 @@ def train_xgboost(x_train, y_train, params=None):
     base_estimator = xgb.XGBRegressor(**params)
     model = MultiOutputRegressor(base_estimator)
     X_train = x_train.drop("ID", axis=1) if "ID" in x_train.columns else x_train
-    model.fit(X_train, y_train)
+    sample_weight = np.mean(np.where(y_train >= 0.5, 1.2, 1), axis=1)
+    model.fit(X_train, y_train, sample_weight=sample_weight)
     return model
 
 
@@ -149,42 +151,40 @@ def benchmark_xgboost(
     best_model = None
     best_params = None
 
-    # Progress bar for parameter combinations
-    if verbose:
-        param_combinations = tqdm(
-            param_combinations, desc="XGBoost Hyperparameter Search"
-        )
+    try:
+        # Progress bar for parameter combinations
+        pbar = tqdm(total=len(param_combinations), desc="Training XGBoost")
 
-    # Evaluate each parameter combination
-    for params in param_combinations:
-        model = train_xgboost(x_train, y_train, params=params)
+        # Evaluate each parameter combination
+        for params in param_combinations:
+            model = train_xgboost(x_train, y_train, params=params)
 
-        # Evaluate on full validation set
-        train_rmse = evaluate_model(model, x_train, y_train)
-        val_rmse = evaluate_model(model, x_val, y_val)
+            # Evaluate on full validation set
+            train_rmse = evaluate_model(model, x_train, y_train)
+            val_rmse = evaluate_model(model, x_val, y_val)
 
-        if val_rmse < best_val_rmse:
-            best_val_rmse = val_rmse
-            best_model = model
-            best_params = params
+            if val_rmse < best_val_rmse:
+                best_val_rmse = val_rmse
+                best_model = model
+                best_params = params
+            pbar.update(1)
+            if verbose:
+                print(f"\nParameters: {params}")
 
-        if verbose:
-            print(f"\nParameters: {params}")
-            print(f"Training Weighted RMSE: {train_rmse:.4f}")
-            print(f"Validation Weighted RMSE: {val_rmse:.4f}")
+                # Evaluate on humidity subsets
+                if subset_humidity:
+                    print("\nPerformance on humidity subsets:")
+                    for i, (x_subset, y_subset) in enumerate(humidity_subsets):
+                        subset_rmse = evaluate_model(model, x_subset, y_subset)
+                        humidity_range = f"[{i*0.2:.1f}, {(i+1)*0.2:.1f}]"
+                        print(
+                            f"Humidity {humidity_range}: RMSE = {subset_rmse:.4f} (n={len(x_subset)})"
+                        )
+                print("\n" + "-" * 50)
+            pbar.set_description(
+                f"Train WRMSE: {train_rmse:.4f} Val WRMSE: {val_rmse:.4f}"
+            )
 
-            # Evaluate on humidity subsets
-            if subset_humidity:
-                print("\nPerformance on humidity subsets:")
-                for i, (x_subset, y_subset) in enumerate(humidity_subsets):
-                    subset_rmse = evaluate_model(model, x_subset, y_subset)
-                    humidity_range = f"[{i*0.2:.1f}, {(i+1)*0.2:.1f}]"
-                    print(
-                        f"Humidity {humidity_range}: RMSE = {subset_rmse:.4f} (n={len(x_subset)})"
-                    )
-            print("\n" + "-" * 50)
-
-    if verbose:
         print("\nBest XGBoost Model:")
         print(f"Parameters: {best_params}")
         print(f"Validation RMSE: {best_val_rmse:.4f}")
@@ -201,5 +201,8 @@ def benchmark_xgboost(
         else:
             print("\nBest Model Performance on validation set:")
             print(f"Validation RMSE: {best_val_rmse:.4f}")
-
-    return best_model, best_params, best_val_rmse
+    except KeyboardInterrupt:
+        print("\nExperiment interrupted by user.")
+    finally:
+        pbar.close()
+        return best_model, best_params, best_val_rmse

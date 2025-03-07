@@ -52,6 +52,14 @@ def plot_feature_distributions(df, bins=50, exclude=["ID"], figsize=(12, 12)):
     plt.show()
 
 
+def boxplots(df, figsize=(12, 10)):
+    plt.figure(figsize=figsize)
+    sns.boxplot(data=df)
+    plt.title("Boxplots of Features")
+    plt.xticks(rotation=45)
+    plt.show()
+
+
 def plot_correlations(df, figsize=(12, 10), annot=False):
     plt.figure(figsize=figsize)
     corr = df.corr()

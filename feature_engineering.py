@@ -133,6 +133,11 @@ def create_humidity_interactions(df):
     for col in sensor_cols:
         df_result[f"Humidity_{col}_product"] = df_result["Humidity"] * df_result[col]
 
+    for col in sensor_cols:
+        df_result[f"Humidity_{col}_ratio"] = df_result[col] / (
+            df_result["Humidity"] + 1e-8
+        )
+
     # Create interactions with group means if they exist
     for group_mean in ["M12_15_mean", "M4_7_mean", "RS_mean"]:
         if group_mean in df_result.columns:

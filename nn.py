@@ -3,9 +3,159 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
+from torch.utils.data import DataLoader, TensorDataset
+
 
 from data_preprocessing import splits_to_dataloaders
 from residual_attention_net import RAMTNet
+from uda import GradientReversal, DomainDiscriminator
+from data_preprocessing import full_pipeline
+from utils import write_submissions
+
+
+class StackEnsemble(nn.Module):
+    def __init__(self, models, groups):
+        """
+        models: list of models
+        groups: list of tuples with lower and upper bounds of the group
+        """
+        super(StackEnsemble, self).__init__()
+        self.models = models
+        self.groups = groups
+        self.fc = nn.Linear(13, 1)  # dummy layer for parameters init
+
+    def forward(self, x):
+        x_groups = []
+        for i in range(len(self.groups)):
+            x_groups.append(
+                x[(x[:, 0] > self.groups[i][0]) & (x[:, 0] <= self.groups[i][1])]
+            )
+        # then pass each group through its corresponding model
+        y = []
+        for i in range(len(self.models)):
+            if len(x_groups[i]) == 0:
+                continue
+            y.append(self.models[i](x_groups[i]))
+        y = torch.cat(y, dim=0)
+        return y
+
+
+class MLPBlock(nn.Module):
+    def __init__(self, input_dim, output_dim, dropout_rate=0.3, bias=True):
+        super(MLPBlock, self).__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, output_dim, bias=bias),
+            nn.BatchNorm1d(output_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(output_dim, output_dim, bias=bias),
+            nn.BatchNorm1d(output_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+        )
+
+    def forward(self, x):
+        return self.mlp(x)
+
+
+class MultiModalEncoder(nn.Module):
+    def __init__(self, humidity_dim, group_embed_dim, bias=True):
+        super(MultiModalEncoder, self).__init__()
+        self.hum_mlp = MLPBlock(1, humidity_dim, bias=bias)
+        self.m12_m15_mlp = MLPBlock(4, group_embed_dim, bias=bias)
+        self.m4_7_mlp = MLPBlock(4, group_embed_dim, bias=bias)
+        self.rs_mlp = MLPBlock(4, group_embed_dim, bias=bias)
+        self.latent_dim = humidity_dim + group_embed_dim * 3
+
+    def forward(self, x):
+        """
+        Expects x to be (batch_size, 13) with order:
+         x[:,0]   = humidity
+         x[:,1:5] = M12, M13, M14, M15
+         x[:,5:9] = M4,  M5,  M6,  M7
+         x[:,9:13]= R,   S1,  S2,  S3
+        """
+        # 1) Separate humidity from the sensor groups
+        humidity = x[:, 0:1]
+        m12_15 = x[:, 1:5]
+        m4_7 = x[:, 5:9]
+        rs = x[:, 9:13]
+        # 2) Forward through each small MLP
+        hum_embed = self.hum_mlp(humidity)
+        m12_15_embed = self.m12_m15_mlp(m12_15)
+        m4_7_embed = self.m4_7_mlp(m4_7)
+        rs_embed = self.rs_mlp(rs)
+        # 3) Concatenate all embeddings
+        fused = torch.cat([hum_embed, m12_15_embed, m4_7_embed, rs_embed], dim=1)
+        return fused
+
+
+class RegressorHead(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_output, bias=True, dropout_rate=0.3):
+        super(RegressorHead, self).__init__()
+        self.head = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim, bias=bias),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dim, hidden_dim // 2, bias=bias),
+            nn.BatchNorm1d(hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dim // 2, num_output, bias=bias),
+            # nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.head(x)
+
+
+class RegressorV3(nn.Module):
+    def __init__(
+        self,
+        hidden_dim=128,
+        num_output=23,
+        humidity_dim=16,
+        group_embed_dim=16,
+        bias=True,
+        dropout_rate=0.3,
+    ):
+        """
+        Args:
+          hidden_dim (int): Size of the hidden dimension for the final regressor MLP.
+          num_output (int): Number of gas categories, i.e. c1–c23.
+          humidity_dim (int): Size of the hidden dimension in the humidity MLP.
+          group_embed_dim (int): Size of the hidden dimension in each sensor group's MLP.
+          bias (bool): Whether to use bias in linear layers.
+          dropout_rate (float): Dropout probability for regularization.
+        """
+        super(RegressorV3, self).__init__()
+
+        self.encoder = MultiModalEncoder(
+            humidity_dim=humidity_dim,
+            group_embed_dim=group_embed_dim,
+            bias=bias,
+        )
+
+        self.head = RegressorHead(
+            input_dim=self.encoder.latent_dim,
+            hidden_dim=hidden_dim,
+            num_output=num_output,
+            bias=bias,
+            dropout_rate=dropout_rate,
+        )
+
+    def forward(self, x):
+        """
+        Expects x to be (batch_size, 13) with order:
+         x[:,0]   = humidity
+         x[:,1:5] = M12, M13, M14, M15
+         x[:,5:9] = M4,  M5,  M6,  M7
+         x[:,9:13]= R,   S1,  S2,  S3
+        """
+        fused = self.encoder(x)
+        out = self.head(fused)
+        return out
 
 
 class NNRegressor(nn.Module):
@@ -270,10 +420,28 @@ class WeightedRMSELoss(nn.Module):
         return loss
 
 
-def plot_loss(train_losses, val_losses):
+class ZeroInflatedWeightedRMSELoss(nn.Module):
+    def __init__(self, zero_penalty_factor=2.0):
+        super().__init__()
+        self.zero_penalty_factor = zero_penalty_factor
+
+    def forward(self, output, target):
+        weights = torch.where(target < 0.5, 1.0, 1.2)
+        squared_error = weights * (output - target) ** 2
+
+        zero_penalty = (target == 0).float() * (output**2)
+
+        combined_loss = squared_error + zero_penalty * self.zero_penalty_factor
+
+        mean_loss = torch.mean(squared_error + zero_penalty)
+        return torch.sqrt(mean_loss)
+
+
+def plot_loss(train_losses, val_losses, labels):
     plt.figure(figsize=(10, 5))
     plt.plot(train_losses, label="Training Loss")
-    plt.plot(val_losses, label="Validation Loss")
+    for val_loss, label in zip(val_losses, labels):
+        plt.plot(val_loss, label=label)
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.legend()
@@ -307,15 +475,125 @@ def evaluate_nn_regressor(model, val_loader, criterion, device):
     return val_loss / len(val_loader)
 
 
-def run_experiment(
-    x_train, y_train, x_val, y_val, params=None, verbose=False, plot_losses=False
+def train_nn_regressor_uda(
+    model,
+    domain_disc,
+    grl,
+    source_loader,
+    target_loader,
+    optimizer,
+    optimizer_disc,
+    criterion,
+    domain_criterion,
+    lambda_domain,
+    device,
 ):
+    model.train()
+    domain_disc.train()
+    disc_loss = 0
+    reg_loss = 0
+    train_loss = 0
+    disc_correct = 0
+    total = 0
+    source_iter = iter(source_loader)
+    target_iter = iter(target_loader)
+
+    # Loop through source batches
+    for i in range(len(source_loader)):
+        try:
+            source_data, source_target = next(source_iter)
+        except StopIteration:
+            source_iter = iter(source_loader)
+            source_data, source_target = next(source_iter)
+
+        try:
+            target_data, _ = next(target_iter)
+        except StopIteration:
+            target_iter = iter(target_loader)
+            target_data, _ = next(target_iter)
+
+        source_data, source_target = source_data.to(device), source_target.to(device)
+        target_data = target_data.to(device)
+
+        # --- Forward pass for source samples ---
+        # Obtain latent features using the encoder (inside RegressorV3)
+        fused_source = model.encoder(source_data)
+        preds = model.head(fused_source)
+        loss_reg = criterion(preds, source_target)
+
+        # --- Domain Discriminator Loss ---
+        # Get latent features for target samples
+        fused_target = model.encoder(target_data)
+        # Combine source and target latent features
+        combined = torch.cat([fused_source, fused_target], dim=0)
+        # Domain labels: 0 for source, 1 for target
+        domain_labels = torch.cat(
+            [torch.zeros(fused_source.size(0)), torch.ones(fused_target.size(0))], dim=0
+        ).to(device)
+        # Pass through GRL then domain discriminator
+        reversed_features = grl(combined)
+        domain_preds = domain_disc(reversed_features)
+        loss_domain = domain_criterion(domain_preds.view(-1), domain_labels)
+
+        # --- Total Loss ---
+        total_loss = loss_reg + lambda_domain * loss_domain
+
+        optimizer.zero_grad()
+        optimizer_disc.zero_grad()
+        total_loss.backward()
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        # torch.nn.utils.clip_grad_norm_(domain_disc.parameters(), max_norm=1.0)
+        optimizer.step()
+        optimizer_disc.step()
+
+        train_loss += total_loss.item()
+        disc_loss += loss_domain.item()
+        reg_loss += loss_reg.item()
+        predicted = (domain_preds.view(-1) > 0.5).float()
+        total += domain_labels.size(0)
+        disc_correct += (predicted == domain_labels.view(-1)).sum().item()
+
+    return (
+        train_loss / len(source_loader),
+        disc_loss / len(source_loader),
+        reg_loss / len(source_loader),
+        disc_correct / total,
+    )
+
+
+def run_experiment(
+    x_source_train,
+    y_source_train,
+    x_target_train,
+    valsets,
+    params=None,
+    uda=False,
+    lambda_domain=1.0,
+    verbose=False,
+    plot_losses=False,
+    labels=None,
+    zero_weight=2.0,
+):
+    """
+    x_source_train, y_source_train: source training data and labels (pandas.DataFrame).
+    x_target_train: target training data (unlabeled).
+    valsets: list of (x_val, y_val) tuples for validation.
+    params: dictionary of parameters.
+    uda: whether to use unsupervised domain adaptation.
+    lambda_domain: weighting factor for domain loss.
+    verbose: whether to print training progress.
+    plot_losses: whether to plot training and validation losses.
+    labels: list of labels for validation sets.
+    zero_weight: weighting factor for zero loss.
+    """
     if params is None:
         params = {
-            "model_class": "GasDetectionModel",
+            "model_class": "RegressorV3",
             "model_params": {
-                "hidden_dim": 256,
+                "hidden_dim": 128,
                 "num_output": 23,
+                "humidity_dim": 16,
+                "group_embed_dim": 16,
                 "bias": True,
                 "dropout_rate": 0.3,
             },
@@ -333,6 +611,8 @@ def run_experiment(
 
     model_params = params["model_params"]
     training_params = params["training_params"]
+
+    # Instantiate model based on model_class
     if params["model_class"] == "NNRegressor":
         model = NNRegressor(**model_params)
     elif params["model_class"] == "GasDetectionModel":
@@ -343,17 +623,47 @@ def run_experiment(
         model = BasicDeepRegressor(**model_params)
     elif params["model_class"] == "RAMTNet":
         model = RAMTNet(**model_params)
+    elif params["model_class"] == "RegressorV3":
+        model = RegressorV3(**model_params)
     else:
         raise NotImplementedError(
-            f"Model class '{params["model_class"]}' not implemented"
+            f"Model class '{params['model_class']}' not implemented"
         )
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=training_params["lr"],
-        weight_decay=training_params["weight_decay"],
-    )
+
+    # For UDA, we need a domain discriminator and GRL.
+    if uda:
+        # Create domain discriminator with input dim equal to encoder's latent dimension.
+        domain_disc = DomainDiscriminator(
+            input_dim=model.encoder.latent_dim,
+            hidden_dim=64,
+            dropout_rate=model_params["dropout_rate"],
+        )
+        domain_disc.to(device)
+        # Create Gradient Reversal Layer (we can set lambda here, though it might be annealed during training)
+        grl = GradientReversal(lambda_=1.0)
+        # Use separate optimizers for model and domain discriminator.
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=training_params["lr"],
+            weight_decay=training_params["weight_decay"],
+        )
+        optimizer_disc = torch.optim.AdamW(
+            domain_disc.parameters(),
+            lr=training_params["lr"],
+            weight_decay=training_params["weight_decay"],
+        )
+        # Use binary cross entropy loss for domain classification.
+        domain_criterion = nn.BCELoss()
+    else:
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=training_params["lr"],
+            weight_decay=training_params["weight_decay"],
+        )
+
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min",
@@ -361,48 +671,175 @@ def run_experiment(
         patience=training_params["patience"],
         min_lr=training_params["min_lr"],
     )
+
     if training_params["loss"] == "WeightedRMSELoss":
         criterion = WeightedRMSELoss()
+    elif training_params["loss"] == "ZeroInflatedWeightedRMSELoss":
+        criterion = ZeroInflatedWeightedRMSELoss(zero_penalty_factor=zero_weight)
     elif training_params["loss"] == "MSELoss":
         criterion = nn.MSELoss()
     else:
         raise NotImplementedError(
             f"Loss function '{training_params['loss']}' not implemented"
         )
+
     if verbose:
         print(
             "Number of trainable parameters:",
             sum(p.numel() for p in model.parameters() if p.requires_grad),
         )
-    train_loader, val_loader = splits_to_dataloaders(
-        x_train, y_train, x_val, y_val, training_params["batch_size"]
+
+    # Build source data loader
+    source_dataset = TensorDataset(
+        torch.tensor(x_source_train.values, dtype=torch.float32),
+        torch.tensor(y_source_train.values, dtype=torch.float32),
     )
+    source_loader = DataLoader(
+        source_dataset, batch_size=training_params["batch_size"], shuffle=True
+    )
+
+    # For UDA: build target loader (unlabeled). We'll create dummy labels.
+    if uda:
+        target_dataset = TensorDataset(
+            torch.tensor(x_target_train.values, dtype=torch.float32),
+            torch.zeros(len(x_target_train.values)),
+        )  # dummy labels
+        target_loader = DataLoader(
+            target_dataset, batch_size=training_params["batch_size"], shuffle=True
+        )
+
+    # Build validation loaders
+    val_loaders = []
+    for i, (x_val, y_val) in enumerate(valsets):
+        # Create validation loader directly from the provided validation data
+        x_val = x_val.drop("ID", axis=1) if "ID" in x_val.columns else x_val
+        y_val = y_val.drop("ID", axis=1) if "ID" in y_val.columns else y_val
+        val_dataset = TensorDataset(
+            torch.tensor(x_val.values, dtype=torch.float32),
+            torch.tensor(y_val.values, dtype=torch.float32),
+        )
+        val_loader = DataLoader(
+            val_dataset, batch_size=training_params["batch_size"], shuffle=False
+        )
+        val_loaders.append(val_loader)
+    if labels is None:
+        if len(valsets) == 1:
+            labels = ["Validation Set"]
+        else:
+            labels = [f"Val Set {i}" for i in range(len(val_loaders))]
 
     if verbose:
         pbar = tqdm(total=training_params["n_epochs"])
     if plot_losses:
         train_losses = []
-        val_losses = []
+        val_losses_all = [[] for _ in range(len(val_loaders))]
+
     criterion_val = WeightedRMSELoss()
     for epoch in range(training_params["n_epochs"]):
-        train_loss = train_nn_regressor(
-            model, train_loader, optimizer, criterion, device
-        )
-        val_loss = evaluate_nn_regressor(model, val_loader, criterion_val, device)
-        scheduler.step(val_loss)
-        if plot_losses:
-            train_losses.append(train_loss)
-            val_losses.append(val_loss)
-        if verbose:
-            pbar.set_description(
-                f"Epoch {epoch+1}/{training_params['n_epochs']} - Train Loss: {train_loss:.4f}, Val Loss (weighted): {val_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
+        if uda:
+            train_loss, disc_loss, reg_loss, disc_acc = train_nn_regressor_uda(
+                model,
+                domain_disc,
+                grl,
+                source_loader,
+                target_loader,
+                optimizer,
+                optimizer_disc,
+                criterion,
+                domain_criterion,
+                lambda_domain,
+                device,
             )
+        else:
+            train_loss = train_nn_regressor(
+                model, source_loader, optimizer, criterion, device
+            )
+
+        # Track validation losses for all validation sets
+        val_losses = []
+        for i, val_loader in enumerate(val_loaders):
+            val_loss = evaluate_nn_regressor(model, val_loader, criterion_val, device)
+            val_losses.append(val_loss)
+            if plot_losses:
+                val_losses_all[i].append(val_loss)
+
+        # Calculate mean validation loss for scheduler
+        mean_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
+
+        # Update scheduler with mean validation loss
+        scheduler.step(mean_val_loss)
+
+        if plot_losses:
+            if uda:
+                train_losses.append(reg_loss)
+            else:
+                train_losses.append(train_loss)
+
         if verbose:
+            if uda:
+                pbar.set_description(
+                    f"Epoch {epoch+1}/{training_params['n_epochs']} - Train Disc Acc: {disc_acc*100:.2f}%, Train Disc Loss: {disc_loss:.4f}, Train Reg Loss: {reg_loss:.4f}, Train Loss: {train_loss:.4f}, Val Loss: {mean_val_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
+                )
+            else:
+                pbar.set_description(
+                    f"Epoch {epoch+1}/{training_params['n_epochs']} - Train Loss: {train_loss:.4f}, Val Loss: {mean_val_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
+                )
             pbar.update(1)
     if verbose:
         pbar.close()
-    val_loss = evaluate_nn_regressor(model, val_loader, criterion_val, device)
-    print("Validation Weighted RMSE: {:.4f}".format(val_loss))
+        if len(valsets) == 1:
+            final_val_rmse = evaluate_nn_regressor(
+                model, val_loaders[0], criterion_val, device
+            )
+            print(f"Final Validation Weighted RMSE: {final_val_rmse:.4f}")
     if plot_losses:
-        plot_loss(train_losses, val_losses)
+        plot_loss(train_losses, val_losses_all, labels)
     return model
+
+
+def submit_nn(
+    checkpoint,
+    model_class,
+    model_params,
+    pipeline_params,
+    test_path,
+    submission_path,
+    use_embed=False,
+):
+    """
+    checkpoint: path to the checkpoint file.
+    model_class: class of the model to use.
+    model_params: parameters for the model.
+    pipeline_params: parameters for the pipeline.
+    test_path: path to the test data.
+    submission_path: path to save the submission file.
+    use_embed: whether to use embeddings as features.
+    """
+    if model_class == "NNRegressor":
+        model = NNRegressor(**model_params)
+    elif model_class == "GasDetectionModel":
+        model = GasDetectionModel(**model_params)
+    elif model_class == "NNRegressorV2":
+        model = NNRegressorV2(**model_params)
+    elif model_class == "BasicDeepRegressor":
+        model = BasicDeepRegressor(**model_params)
+    elif model_class == "RAMTNet":
+        model = RAMTNet(**model_params)
+    elif model_class == "RegressorV3":
+        model = RegressorV3(**model_params)
+    else:
+        raise NotImplementedError(f"Model class '{model_class}' not implemented")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.load_state_dict(torch.load(checkpoint, map_location="cpu"))
+    model.to(device)
+
+    write_submissions(
+        model,
+        test_path,
+        submission_path,
+        use_embed=use_embed,
+        **pipeline_params,
+    )
+
+    return None

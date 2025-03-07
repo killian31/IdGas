@@ -1,5 +1,6 @@
 from sklearn.ensemble import RandomForestRegressor
-
+from tqdm import tqdm
+import itertools
 from utils import evaluate_model
 
 
@@ -66,7 +67,11 @@ def create_humidity_subsets(x_val, y_val):
 
     for start, end in humidity_ranges:
         # Get indices where humidity falls within the current range
-        mask = (x_val["Humidity_x"] >= start) & (x_val["Humidity_x"] < end)
+        mask = (
+            (x_val["Humidity_x"] >= start) & (x_val["Humidity_x"] < end)
+            if "Humidity_x" in x_val.columns
+            else (x_val["Humidity"] >= start) & (x_val["Humidity"] < end)
+        )
         x_subset = x_val[mask]
         y_subset = y_val.loc[x_subset.index]
         subsets.append((x_subset, y_subset))
@@ -74,7 +79,9 @@ def create_humidity_subsets(x_val, y_val):
     return subsets
 
 
-def benchmark_random_forest(x_train, y_train, x_val, y_val, verbose=True):
+def benchmark_random_forest(
+    x_train, y_train, x_val, y_val, param_grid=None, verbose=True, subset_humidity=False
+):
     """Perform hyperparameter search for RandomForestRegressor and evaluate on humidity-based subsets.
 
     Parameters:
@@ -83,20 +90,19 @@ def benchmark_random_forest(x_train, y_train, x_val, y_val, verbose=True):
         x_val (DataFrame): Validation features
         y_val (DataFrame): Validation targets
         verbose (bool): Whether to print progress and results
+        subset_humidity (bool): Whether to evaluate on humidity-based subsets
 
     Returns:
         tuple: (best_model, best_params, best_val_rmse)
     """
-    from tqdm import tqdm
-    import itertools
-
     # Define parameter grid
-    param_grid = {
-        "n_estimators": [50, 100, 200],
-        "max_depth": [7, 10, 15, None],
-        "min_samples_split": [0.01, 0.05, 0.1],
-        "min_samples_leaf": [20, 30, 50],
-    }
+    if param_grid is None:
+        param_grid = {
+            "n_estimators": [50, 100, 200],
+            "max_depth": [7, 10, 15, None],
+            "min_samples_split": [0.005, 0.01, 0.02],
+            "min_samples_leaf": [10, 20, 30, 50],
+        }
 
     # Create all parameter combinations
     param_combinations = [
@@ -109,7 +115,8 @@ def benchmark_random_forest(x_train, y_train, x_val, y_val, verbose=True):
         params.update(fixed_params)
 
     # Create humidity-based validation subsets
-    humidity_subsets = create_humidity_subsets(x_val, y_val)
+    if subset_humidity:
+        humidity_subsets = create_humidity_subsets(x_val, y_val)
 
     best_val_rmse = float("inf")
     best_model = None
@@ -124,6 +131,7 @@ def benchmark_random_forest(x_train, y_train, x_val, y_val, verbose=True):
         model = train_random_forest(x_train, y_train, params=params)
 
         # Evaluate on full validation set
+        train_rmse = evaluate_model(model, x_train, y_train)
         val_rmse = evaluate_model(model, x_val, y_val)
 
         if val_rmse < best_val_rmse:
@@ -133,16 +141,18 @@ def benchmark_random_forest(x_train, y_train, x_val, y_val, verbose=True):
 
         if verbose:
             print(f"\nParameters: {params}")
-            print(f"Full Validation RMSE: {val_rmse:.4f}")
+            print(f"Training Weighted RMSE: {train_rmse:.4f}")
+            print(f"Validation Weighted RMSE: {val_rmse:.4f}")
 
             # Evaluate on humidity subsets
-            print("\nPerformance on humidity subsets:")
-            for i, (x_subset, y_subset) in enumerate(humidity_subsets):
-                subset_rmse = evaluate_model(model, x_subset, y_subset)
-                humidity_range = f"[{i*0.2:.1f}, {(i+1)*0.2:.1f}]"
-                print(
-                    f"Humidity {humidity_range}: RMSE = {subset_rmse:.4f} (n={len(x_subset)})"
-                )
+            if subset_humidity:
+                print("\nPerformance on humidity subsets:")
+                for i, (x_subset, y_subset) in enumerate(humidity_subsets):
+                    subset_rmse = evaluate_model(model, x_subset, y_subset)
+                    humidity_range = f"[{i*0.2:.1f}, {(i+1)*0.2:.1f}]"
+                    print(
+                        f"Humidity {humidity_range}: RMSE = {subset_rmse:.4f} (n={len(x_subset)})"
+                    )
             print("\n" + "-" * 50)
 
     if verbose:
@@ -151,12 +161,16 @@ def benchmark_random_forest(x_train, y_train, x_val, y_val, verbose=True):
         print(f"Validation RMSE: {best_val_rmse:.4f}")
 
         # Evaluate best model on humidity subsets
-        print("\nBest Model Performance on humidity subsets:")
-        for i, (x_subset, y_subset) in enumerate(humidity_subsets):
-            subset_rmse = evaluate_model(best_model, x_subset, y_subset)
-            humidity_range = f"[{i*0.2:.1f}, {(i+1)*0.2:.1f}]"
-            print(
-                f"Humidity {humidity_range}: RMSE = {subset_rmse:.4f} (n={len(x_subset)})"
-            )
+        if subset_humidity:
+            print("\nBest Model Performance on humidity subsets:")
+            for i, (x_subset, y_subset) in enumerate(humidity_subsets):
+                subset_rmse = evaluate_model(best_model, x_subset, y_subset)
+                humidity_range = f"[{i*0.2:.1f}, {(i+1)*0.2:.1f}]"
+                print(
+                    f"Humidity {humidity_range}: RMSE = {subset_rmse:.4f} (n={len(x_subset)})"
+                )
+        else:
+            print("\nBest Model Performance on validation set:")
+            print(f"Validation RMSE: {best_val_rmse:.4f}")
 
     return best_model, best_params, best_val_rmse

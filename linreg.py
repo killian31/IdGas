@@ -30,6 +30,8 @@ class SelectiveLinearRegressor(BaseEstimator, RegressorMixin):
         self.alpha = alpha
         self.models = []
         self.selected_features = []
+        self.r_squared = []
+        self.r_squared_no_significant = []
         self.feature_names = None
 
     def fit(self, X, y):
@@ -68,7 +70,7 @@ class SelectiveLinearRegressor(BaseEstimator, RegressorMixin):
 
             # Fit initial model with all features
             initial_model = sm.OLS(y_i, X_with_const).fit()
-
+            self.r_squared_no_significant.append(initial_model.rsquared)
             # Get p-values and identify significant features
             p_values = initial_model.pvalues[1:]  # Skip the constant term
             significant_indices = np.where(p_values < self.alpha)[0]
@@ -86,7 +88,7 @@ class SelectiveLinearRegressor(BaseEstimator, RegressorMixin):
             # Fit final model with significant features
             final_model = LinearRegression()
             final_model.fit(X_significant, y_i)
-
+            self.r_squared.append(final_model.score(X_significant, y_i))
             # Store the final model
             self.models.append(final_model)
 
@@ -165,7 +167,9 @@ def train_linear_regression(x_train, y_train, alpha=0.05):
 
     print("Feature selection results:")
     for i, (target, features) in enumerate(zip(target_cols, selected_features)):
-        print(f"{target}: {len(features)} features selected - {', '.join(features)}")
+        print(
+            f"{target}: {len(features)} features selected - R^2 before selection: {model.r_squared_no_significant[i]} - R^2 after selection: {model.r_squared[i]}"
+        )
 
     return model
 

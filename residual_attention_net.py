@@ -130,6 +130,7 @@ class RAMTNet(nn.Module):
         num_res_blocks=2,
         dropout_rate=0.3,
         head_hidden=64,
+        **kwargs,
     ):
         super(RAMTNet, self).__init__()
         self.embedding = FeatureEmbedding(num_features, embed_dim)

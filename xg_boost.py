@@ -3,7 +3,7 @@ from sklearn.multioutput import MultiOutputRegressor
 import numpy as np
 from tqdm import tqdm
 import itertools
-from utils import evaluate_model
+from utils import evaluate_model, create_humidity_subsets
 
 
 def train_xgboost(x_train, y_train, params=None):
@@ -64,33 +64,6 @@ def run_experiment(x_train, y_train, x_val, y_val, params=None):
     print("Training Weighted RMSE (XGBoost): {:.4f}".format(metric_train))
     print("Validation Weighted RMSE (XGBoost): {:.4f}".format(metric_val))
     return model
-
-
-def create_humidity_subsets(x_val, y_val):
-    """Create validation subsets based on humidity levels.
-
-    Parameters:
-        x_val (DataFrame): Validation features
-        y_val (DataFrame): Validation targets
-
-    Returns:
-        list: List of tuples (x_subset, y_subset) for each humidity range
-    """
-    humidity_ranges = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0)]
-    subsets = []
-
-    for start, end in humidity_ranges:
-        # Get indices where humidity falls within the current range
-        mask = (
-            (x_val["Humidity_x"] >= start) & (x_val["Humidity_x"] < end)
-            if "Humidity_x" in x_val.columns
-            else (x_val["Humidity"] >= start) & (x_val["Humidity"] < end)
-        )
-        x_subset = x_val[mask]
-        y_subset = y_val.loc[x_subset.index]
-        subsets.append((x_subset, y_subset))
-
-    return subsets
 
 
 def benchmark_xgboost(

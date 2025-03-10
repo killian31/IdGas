@@ -206,3 +206,30 @@ def stratify_by_humidity(x_val, y_val, n_strata=5):
         labels.append(f"H in [{boundaries[i]:.2f}, {boundaries[i+1]:.2f}]")
 
     return x_strata, y_strata, labels
+
+
+def create_humidity_subsets(x_val, y_val):
+    """Create validation subsets based on humidity levels.
+
+    Parameters:
+        x_val (DataFrame): Validation features
+        y_val (DataFrame): Validation targets
+
+    Returns:
+        list: List of tuples (x_subset, y_subset) for each humidity range
+    """
+    humidity_ranges = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0)]
+    subsets = []
+
+    for start, end in humidity_ranges:
+        # Get indices where humidity falls within the current range
+        mask = (
+            (x_val["Humidity_x"] >= start) & (x_val["Humidity_x"] < end)
+            if "Humidity_x" in x_val.columns
+            else (x_val["Humidity"] >= start) & (x_val["Humidity"] < end)
+        )
+        x_subset = x_val[mask]
+        y_subset = y_val.loc[x_subset.index]
+        subsets.append((x_subset, y_subset))
+
+    return subsets

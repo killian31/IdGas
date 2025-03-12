@@ -184,7 +184,6 @@ def stratify_by_humidity(x_val, y_val, n_strata=5):
     # Calculate percentile boundaries to ensure no empty sets
     percentiles = np.linspace(0, 100, n_strata + 1)
     boundaries = np.percentile(x_val["Humidity"], percentiles)
-
     x_strata = []
     y_strata = []
     labels = []  # for plotting

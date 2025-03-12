@@ -746,6 +746,8 @@ def run_experiment(
         )
 
     # Build source data loader
+    x_source_train = x_source_train.drop("ID", axis=1) if "ID" in x_source_train.columns else x_source_train
+    y_source_train = y_source_train.drop("ID", axis=1) if "ID" in y_source_train.columns else y_source_train
     source_dataset = TensorDataset(
         torch.tensor(x_source_train.values, dtype=torch.float32),
         torch.tensor(y_source_train.values, dtype=torch.float32),

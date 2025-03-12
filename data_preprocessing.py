@@ -12,10 +12,10 @@ def preprocess_data(df):
     Preprocesses the dataset by applying the appropriate transformations:
     - StandardScaler to M12-M15 (Gaussian distribution)
     - Log transformation + StandardScaler to M4-M7, R, S1-S3 (preserving structure without distorting negatives)
-    - Log to Humidity
+    - Leaves Humidity and ID unchanged
     """
     df_transformed = df.copy()
-    """
+
     standard_scaler_features = ["M12", "M13", "M14", "M15"]
     log_standard_scaler_features = [
         "M4",
@@ -41,14 +41,6 @@ def preprocess_data(df):
     df_transformed[log_standard_scaler_features] = log_scaler.fit_transform(
         df_transformed[log_standard_scaler_features]
     )
-    df_transformed["Humidity"] = np.log1p(df_transformed["Humidity"])
-    """
-    # rescale every column between 0 and 1 except humidity
-    for col in df_transformed.columns:
-        if "Humidity" not in col and col != "ID":
-            df_transformed[col] = (df_transformed[col] - df_transformed[col].min()) / (
-                df_transformed[col].max() - df_transformed[col].min()
-            )
 
     return df_transformed
 
@@ -294,7 +286,7 @@ def full_pipeline(
         if df_y is not None:
             df_y = df_y[df_y["ID"].isin(df_x["ID"])]
     if rescale:
-        df_x_processed = preprocess_data_2(df_x)
+        df_x_processed = preprocess_data(df_x)
     else:
         df_x_processed = df_x
     if reduce_features:

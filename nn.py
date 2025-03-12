@@ -65,7 +65,7 @@ class MultiModalEncoder(nn.Module):
         self.m12_m15_mlp = MLPBlock(4, group_embed_dim, bias=bias)
         self.m4_7_mlp = MLPBlock(4, group_embed_dim, bias=bias)
         self.rs_mlp = MLPBlock(4, group_embed_dim, bias=bias)
-        self.latent_dim = humidity_dim + group_embed_dim * 3
+        self.embed_dim = humidity_dim + group_embed_dim * 3
 
     def forward(self, x):
         """
@@ -138,7 +138,7 @@ class RegressorV3(nn.Module):
         )
 
         self.head = RegressorHead(
-            input_dim=self.encoder.latent_dim,
+            input_dim=self.encoder.embed_dim,
             hidden_dim=hidden_dim,
             num_output=num_output,
             bias=bias,
@@ -408,6 +408,60 @@ class BasicDeepRegressor(nn.Module):
         return x
 
 
+class SensorCNN(nn.Module):
+    def __init__(
+        self,
+        input_dim=13,      # Number of sensors
+        embed_dim=32,      # Output dimension of initial linear
+        conv_channels=64,  # Number of output channels for the final convolution
+        final_dim=32,      # Final vector size before output
+        num_output=23      # Number of outputs (e.g., tasks or classes)
+    ):
+        super(SensorCNN, self).__init__()
+        # 1) Linear: map 13 -> embed_dim
+        self.linear_in = nn.Linear(input_dim, embed_dim)
+
+        # 2) Convolution layers
+        # Treat the embedding as (batch, 1 channel, sequence_length=embed_dim)
+        self.conv1 = nn.Conv1d(in_channels=1, out_channels=16, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm1d(16)
+        self.conv2 = nn.Conv1d(in_channels=16, out_channels=conv_channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm1d(conv_channels)
+
+        # 3) Fusion layer: flatten + linear -> final_dim
+        self.fusion_fc = nn.Linear(conv_channels * embed_dim, final_dim)
+
+        # 4) Final layer: map final_dim -> num_output
+        self.output_layer = nn.Linear(final_dim, num_output)
+
+    def forward(self, x):
+        """
+        x: (batch_size, 13)  ->  linear_in -> (batch_size, embed_dim)
+        Then reshape for conv: (batch_size, 1, embed_dim)
+        """
+        # Step 1: Initial linear
+        x = self.linear_in(x)                    # (batch, embed_dim)
+        x = F.relu(x)
+        x = x.unsqueeze(1)                       # (batch, 1, embed_dim)
+
+        # Step 2: Convolutions
+        x = self.conv1(x)                        # (batch, 16, embed_dim)
+        x = self.bn1(x)
+        x = F.relu(x)
+        x = self.conv2(x)                        # (batch, conv_channels, embed_dim)
+        x = self.bn2(x)
+        x = F.relu(x)
+
+        # Step 3: Flatten and fusion
+        x = x.view(x.size(0), -1)                # (batch, conv_channels * embed_dim)
+        x = self.fusion_fc(x)                    # (batch, final_dim)
+        x = F.relu(x)
+
+        # Step 4: Output layer
+        x = self.output_layer(x)                 # (batch, num_output)
+        return x
+
+
 class WeightedRMSELoss(nn.Module):
     def __init__(self):
         super(WeightedRMSELoss, self).__init__()
@@ -457,7 +511,7 @@ def train_nn_regressor(model, train_loader, optimizer, criterion, device):
         output = model(data)
         loss = criterion(output, target)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         train_loss += loss.item()
     return train_loss / len(train_loader)
@@ -625,6 +679,8 @@ def run_experiment(
         model = RAMTNet(**model_params)
     elif params["model_class"] == "RegressorV3":
         model = RegressorV3(**model_params)
+    elif params["model_class"] == "SensorCNN":
+        model = SensorCNN(**model_params)
     else:
         raise NotImplementedError(
             f"Model class '{params['model_class']}' not implemented"
@@ -637,7 +693,7 @@ def run_experiment(
     if uda:
         # Create domain discriminator with input dim equal to encoder's latent dimension.
         domain_disc = DomainDiscriminator(
-            input_dim=model.encoder.latent_dim,
+            input_dim=model.encoder.embed_dim,
             hidden_dim=64,
             dropout_rate=model_params["dropout_rate"],
         )

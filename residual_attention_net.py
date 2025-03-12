@@ -64,6 +64,60 @@ class SelfAttentionBlock(nn.Module):
         return x
 
 
+class FusionLayer(nn.Module):
+    """
+    Fusion layer for combining multi-head self-attention outputs.
+    """
+
+    def __init__(self, total_embed_dim, embed_dim, dropout_rate=0.1):
+        super(FusionLayer, self).__init__()
+        self.fc = nn.Linear(total_embed_dim, embed_dim)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, x):
+        x = self.fc(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        return x
+
+
+class RAMTEncoder(nn.Module):
+    """
+    Multi-head self-attention encoder for sequences.
+    """
+
+    def __init__(
+        self,
+        num_features,
+        feature_embed_dim,
+        embed_dim,
+        num_heads,
+        num_blocks,
+        dropout_rate=0.1,
+    ):
+        super(RAMTEncoder, self).__init__()
+        self.embed_dim = embed_dim
+        self.embedder = FeatureEmbedding(num_features, feature_embed_dim)
+        self.attention_blocks = nn.ModuleList(
+            [
+                SelfAttentionBlock(feature_embed_dim, num_heads, dropout_rate)
+                for _ in range(num_blocks)
+            ]
+        )
+        self.fusion_layer = FusionLayer(
+            num_features * feature_embed_dim, embed_dim, dropout_rate
+        )
+
+    def forward(self, x):
+        x = self.embedder(x)
+        for block in self.attention_blocks:
+            x = block(x)  # (b, 13, 16)
+        x = x.flatten(1)  # (b, 13 * 16)
+        x = self.fusion_layer(x)  # (b, 16)
+        return x
+
+
 class ResidualDenseBlock(nn.Module):
     """
     A residual block with two fully connected layers, dropout and batch normalization.
@@ -114,6 +168,36 @@ class MultiTaskHead(nn.Module):
         return torch.cat(outputs, dim=1)
 
 
+class RAMTHead(nn.Module):
+    """
+    RAMTNet head module. Combines residual blocks and multi-task heads.
+    """
+
+    def __init__(
+        self,
+        in_features,
+        num_tasks=23,
+        num_res_blocks=2,
+        head_hidden=64,
+        dropout_rate=0.3,
+    ):
+        super(RAMTHead, self).__init__()
+        self.res_blocks = nn.Sequential(
+            *[
+                ResidualDenseBlock(in_features, in_features, dropout_rate)
+                for _ in range(num_res_blocks)
+            ]
+        )
+        self.multitask_head = MultiTaskHead(
+            in_features, num_tasks, head_hidden, dropout_rate
+        )
+
+    def forward(self, x):
+        x = self.res_blocks(x)
+        x = self.multitask_head(x)
+        return x
+
+
 class RAMTNet(nn.Module):
     """
     Enhanced neural network for toxic gas detection using feature embeddings,
@@ -123,40 +207,30 @@ class RAMTNet(nn.Module):
     def __init__(
         self,
         num_features=13,
+        feature_embed_dim=8,
         embed_dim=16,
-        num_heads=4,
-        shared_dim=128,
+        attn_heads=4,
+        attn_blocks=2,
         num_tasks=23,
         num_res_blocks=2,
-        dropout_rate=0.3,
         head_hidden=64,
+        dropout_rate=0.3,
         **kwargs,
     ):
         super(RAMTNet, self).__init__()
-        self.embedding = FeatureEmbedding(num_features, embed_dim)
-        self.attention = SelfAttentionBlock(embed_dim, num_heads, dropout_rate)
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.shared_fc = nn.Linear(embed_dim, shared_dim)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(dropout_rate)
-        self.res_blocks = nn.Sequential(
-            *[
-                ResidualDenseBlock(shared_dim, shared_dim, dropout_rate)
-                for _ in range(num_res_blocks)
-            ]
+        self.encoder = RAMTEncoder(
+            num_features,
+            feature_embed_dim,
+            embed_dim,
+            attn_heads,
+            attn_blocks,
+            dropout_rate,
         )
-        self.multitask_head = MultiTaskHead(
-            shared_dim, num_tasks, head_hidden, dropout_rate
+        self.head = RAMTHead(
+            embed_dim, num_tasks, num_res_blocks, head_hidden, dropout_rate
         )
 
     def forward(self, x):
-        x = self.embedding(x)  # (b, 13, 16)
-        x = self.attention(x)  # (b, 13, 16)
-        x = x.transpose(1, 2)  # (b, 16, 13)
-        x = self.pool(x).squeeze(-1)  # (b, 16) pool over the sequence dimension
-        x = self.shared_fc(x)  # (b, 128)
-        x = self.relu(x)
-        x = self.dropout(x)
-        x = self.res_blocks(x)  # (b, 128)
-        x = self.multitask_head(x)  # (b, 23)
+        x = self.encoder(x)
+        x = self.head(x)
         return x

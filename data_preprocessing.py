@@ -15,7 +15,7 @@ def preprocess_data(df):
     - Log to Humidity
     """
     df_transformed = df.copy()
-
+    """
     standard_scaler_features = ["M12", "M13", "M14", "M15"]
     log_standard_scaler_features = [
         "M4",
@@ -42,6 +42,14 @@ def preprocess_data(df):
         df_transformed[log_standard_scaler_features]
     )
     df_transformed["Humidity"] = np.log1p(df_transformed["Humidity"])
+    """
+    # rescale every column between 0 and 1 except humidity
+    for col in df_transformed.columns:
+        if "Humidity" not in col and col != "ID":
+            df_transformed[col] = (df_transformed[col] - df_transformed[col].min()) / (
+                df_transformed[col].max() - df_transformed[col].min()
+            )
+
     return df_transformed
 
 
@@ -285,12 +293,10 @@ def full_pipeline(
         # Keep only corresponding rows in df_y if available
         if df_y is not None:
             df_y = df_y[df_y["ID"].isin(df_x["ID"])]
-
     if rescale:
-        df_x_processed = preprocess_data(df_x)
+        df_x_processed = preprocess_data_2(df_x)
     else:
         df_x_processed = df_x
-
     if reduce_features:
         df_x_processed = group_measures(df_x_processed)
 
@@ -313,10 +319,8 @@ def full_pipeline(
 
     # From here on, we know we have labels
     df_merged = pd.merge(df_x_processed, df_y, on="ID")
-
     target_columns = [col for col in df_y.columns if col != "ID"]
     feature_columns = [col for col in df_x_processed.columns if col != "ID"]
-
     X = df_merged[["ID"] + feature_columns]
     y = df_merged[target_columns]
 
@@ -330,10 +334,7 @@ def full_pipeline(
         )
     else:
         x_train, y_train, x_val, y_val = X, y, None, None
-
     if split_humidity:
-        # split the training set by humidity using h_humidity (below is kept for training)
-        # then add split_proportion of the high humidity to the validation set, the rest to the training set
         x_train_low_h = (
             x_train[x_train["Humidity_x"] < h_threshold]
             if "Humidity_x" in x_train.columns

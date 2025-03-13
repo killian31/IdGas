@@ -332,7 +332,6 @@ class NNRegressorV2(nn.Module):
         out_M10 = self.block_M10(M12_15, humidity)
         out_RS = self.block_RS(R_S1S2S3, humidity)
 
-        # Fuse
         fused = torch.cat([out_M0, out_M10, out_RS], dim=1)
         fused = self.bn_fuse1(F.relu(self.fc_fuse1(fused)))
         fused = self.dropout(fused)
@@ -411,27 +410,29 @@ class BasicDeepRegressor(nn.Module):
 class SensorCNN(nn.Module):
     def __init__(
         self,
-        input_dim=13,      # Number of sensors
-        embed_dim=32,      # Output dimension of initial linear
-        conv_channels=64,  # Number of output channels for the final convolution
-        final_dim=32,      # Final vector size before output
-        num_output=23      # Number of outputs (e.g., tasks or classes)
+        input_dim=13,  
+        embed_dim=32,   
+        conv_channels=64,  
+        final_dim=32,     
+        num_output=23,     
+        dropout_rate=0.3,
     ):
         super(SensorCNN, self).__init__()
-        # 1) Linear: map 13 -> embed_dim
+        self.embed_dim = embed_dim
+        self.dropout = nn.Dropout(dropout_rate)
         self.linear_in = nn.Linear(input_dim, embed_dim)
 
-        # 2) Convolution layers
-        # Treat the embedding as (batch, 1 channel, sequence_length=embed_dim)
-        self.conv1 = nn.Conv1d(in_channels=1, out_channels=16, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm1d(16)
-        self.conv2 = nn.Conv1d(in_channels=16, out_channels=conv_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm1d(conv_channels)
+        self.conv1 = nn.Conv1d(in_channels=1, out_channels=conv_channels // 8, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm1d(conv_channels // 8)
+        self.conv2 = nn.Conv1d(in_channels=conv_channels // 8, out_channels=conv_channels // 4, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm1d(conv_channels // 4)
+        self.conv3 = nn.Conv1d(in_channels=conv_channels // 4, out_channels=conv_channels // 2, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm1d(conv_channels // 2)
+        self.conv4 = nn.Conv1d(in_channels=conv_channels // 2, out_channels=conv_channels, kernel_size=3, padding=1)
+        self.bn4 = nn.BatchNorm1d(conv_channels)
 
-        # 3) Fusion layer: flatten + linear -> final_dim
         self.fusion_fc = nn.Linear(conv_channels * embed_dim, final_dim)
 
-        # 4) Final layer: map final_dim -> num_output
         self.output_layer = nn.Linear(final_dim, num_output)
 
     def forward(self, x):
@@ -439,26 +440,33 @@ class SensorCNN(nn.Module):
         x: (batch_size, 13)  ->  linear_in -> (batch_size, embed_dim)
         Then reshape for conv: (batch_size, 1, embed_dim)
         """
-        # Step 1: Initial linear
-        x = self.linear_in(x)                    # (batch, embed_dim)
+        x = self.linear_in(x)             
         x = F.relu(x)
-        x = x.unsqueeze(1)                       # (batch, 1, embed_dim)
+        x = x.unsqueeze(1)                      
 
-        # Step 2: Convolutions
-        x = self.conv1(x)                        # (batch, 16, embed_dim)
+        x = self.conv1(x)                
         x = self.bn1(x)
         x = F.relu(x)
-        x = self.conv2(x)                        # (batch, conv_channels, embed_dim)
+        x = self.dropout(x)
+        x = self.conv2(x)                    
         x = self.bn2(x)
         x = F.relu(x)
-
-        # Step 3: Flatten and fusion
-        x = x.view(x.size(0), -1)                # (batch, conv_channels * embed_dim)
-        x = self.fusion_fc(x)                    # (batch, final_dim)
+        x = self.dropout(x)
+        x = self.conv3(x)                       
+        x = self.bn3(x)
         x = F.relu(x)
+        x = self.dropout(x)
+        x = self.conv4(x)                       
+        x = self.bn4(x)
+        x = F.relu(x)
+        x = self.dropout(x)
 
-        # Step 4: Output layer
-        x = self.output_layer(x)                 # (batch, num_output)
+        x = x.view(x.size(0), -1)               
+        x = self.fusion_fc(x)                 
+        x = F.relu(x)
+        x = self.dropout(x)
+
+        x = self.output_layer(x)                
         return x
 
 
@@ -493,7 +501,7 @@ class ZeroInflatedWeightedRMSELoss(nn.Module):
 
 def plot_loss(train_losses, val_losses, labels):
     plt.figure(figsize=(10, 5))
-    plt.plot(train_losses, label="Training Loss")
+    plt.plot(train_losses, label="Training")
     for val_loss, label in zip(val_losses, labels):
         plt.plot(val_loss, label=label)
     plt.xlabel("Epoch")
@@ -615,6 +623,26 @@ def train_nn_regressor_uda(
     )
 
 
+def instantiate_model(model_class, model_params):
+    if model_class == "NNRegressor":
+        model = NNRegressor(**model_params)
+    elif model_class == "GasDetectionModel":
+        model = GasDetectionModel(**model_params)
+    elif model_class == "NNRegressorV2":
+        model = NNRegressorV2(**model_params)
+    elif model_class == "BasicDeepRegressor":
+        model = BasicDeepRegressor(**model_params)
+    elif model_class == "RAMTNet":
+        model = RAMTNet(**model_params)
+    elif model_class == "RegressorV3":
+        model = RegressorV3(**model_params)
+    elif model_class == "SensorCNN":
+        model = SensorCNN(**model_params)
+    else:
+        raise NotImplementedError(f"Model class '{model_class}' not implemented")
+    return model
+
+
 def run_experiment(
     x_source_train,
     y_source_train,
@@ -667,24 +695,7 @@ def run_experiment(
     training_params = params["training_params"]
 
     # Instantiate model based on model_class
-    if params["model_class"] == "NNRegressor":
-        model = NNRegressor(**model_params)
-    elif params["model_class"] == "GasDetectionModel":
-        model = GasDetectionModel(**model_params)
-    elif params["model_class"] == "NNRegressorV2":
-        model = NNRegressorV2(**model_params)
-    elif params["model_class"] == "BasicDeepRegressor":
-        model = BasicDeepRegressor(**model_params)
-    elif params["model_class"] == "RAMTNet":
-        model = RAMTNet(**model_params)
-    elif params["model_class"] == "RegressorV3":
-        model = RegressorV3(**model_params)
-    elif params["model_class"] == "SensorCNN":
-        model = SensorCNN(**model_params)
-    else:
-        raise NotImplementedError(
-            f"Model class '{params['model_class']}' not implemented"
-        )
+    model = instantiate_model(params["model_class"], model_params)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
@@ -782,7 +793,7 @@ def run_experiment(
         val_loaders.append(val_loader)
     if labels is None:
         if len(valsets) == 1:
-            labels = ["Validation Set"]
+            labels = ["Validation"]
         else:
             labels = [f"Val Set {i}" for i in range(len(val_loaders))]
 
@@ -879,20 +890,7 @@ def submit_nn(
     submission_path: path to save the submission file.
     use_embed: whether to use embeddings as features.
     """
-    if model_class == "NNRegressor":
-        model = NNRegressor(**model_params)
-    elif model_class == "GasDetectionModel":
-        model = GasDetectionModel(**model_params)
-    elif model_class == "NNRegressorV2":
-        model = NNRegressorV2(**model_params)
-    elif model_class == "BasicDeepRegressor":
-        model = BasicDeepRegressor(**model_params)
-    elif model_class == "RAMTNet":
-        model = RAMTNet(**model_params)
-    elif model_class == "RegressorV3":
-        model = RegressorV3(**model_params)
-    else:
-        raise NotImplementedError(f"Model class '{model_class}' not implemented")
+    model = instantiate_model(model_class, model_params)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.load_state_dict(torch.load(checkpoint, map_location="cpu"))

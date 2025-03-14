@@ -55,12 +55,14 @@ class SelfAttentionBlock(nn.Module):
         self.layer_norm = nn.LayerNorm(embed_dim)
         self.dropout = nn.Dropout(dropout_rate)
 
-    def forward(self, x):
+    def forward(self, x, return_attn=False):
         x = x.transpose(0, 1)  # (b, 13, 16) -> (13, b, 16) for multihead attention
-        attn_output, _ = self.multihead_attn(x, x, x)
+        attn_output, attn_weights = self.multihead_attn(x, x, x)
         x = x + self.dropout(attn_output)
         x = self.layer_norm(x)
         x = x.transpose(0, 1)
+        if return_attn:
+            return x, attn_weights
         return x
 
 
@@ -176,6 +178,7 @@ class RAMTHead(nn.Module):
     def __init__(
         self,
         in_features,
+        res_hidden,
         num_tasks=23,
         num_res_blocks=2,
         head_hidden=64,
@@ -183,13 +186,16 @@ class RAMTHead(nn.Module):
     ):
         super(RAMTHead, self).__init__()
         self.res_blocks = nn.Sequential(
+            nn.Linear(in_features, res_hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
             *[
-                ResidualDenseBlock(in_features, in_features, dropout_rate)
+                ResidualDenseBlock(res_hidden, res_hidden, dropout_rate)
                 for _ in range(num_res_blocks)
-            ]
+            ],
         )
         self.multitask_head = MultiTaskHead(
-            in_features, num_tasks, head_hidden, dropout_rate
+            res_hidden, num_tasks, head_hidden, dropout_rate
         )
 
     def forward(self, x):
@@ -211,10 +217,12 @@ class RAMTNet(nn.Module):
         embed_dim=16,
         attn_heads=4,
         attn_blocks=2,
-        num_tasks=23,
         num_res_blocks=2,
+        res_hidden=64,
+        num_tasks=23,
         head_hidden=64,
-        dropout_rate=0.3,
+        enc_dropout_rate=0.3,
+        head_dropout_rate=0.3,
         **kwargs,
     ):
         super(RAMTNet, self).__init__()
@@ -224,10 +232,15 @@ class RAMTNet(nn.Module):
             embed_dim,
             attn_heads,
             attn_blocks,
-            dropout_rate,
+            enc_dropout_rate,
         )
         self.head = RAMTHead(
-            embed_dim, num_tasks, num_res_blocks, head_hidden, dropout_rate
+            embed_dim,
+            res_hidden,
+            num_tasks,
+            num_res_blocks,
+            head_hidden,
+            head_dropout_rate,
         )
 
     def forward(self, x):

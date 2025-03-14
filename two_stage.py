@@ -16,48 +16,56 @@ from sklearn.tree import DecisionTreeRegressor
 from sklearn.svm import SVR
 from sklearn.neighbors import KNeighborsRegressor
 from xgboost import XGBRegressor, XGBClassifier
+from utils import create_humidity_subsets
+
 
 def get_classifier_instance(name: str, params: dict):
     """
     Returns an instance of a classifier given its name and parameters.
     """
     name = name.lower()
-    if name in ['randomforestclassifier', 'rf']:
+    if name in ["randomforestclassifier", "rf"]:
         return RandomForestClassifier(**params)
-    elif name in ['decisiontreeclassifier', 'dt']:
+    elif name in ["decisiontreeclassifier", "dt"]:
         return DecisionTreeClassifier(**params)
-    elif name in ['kneighborsclassifier', 'knn']:
+    elif name in ["kneighborsclassifier", "knn"]:
         return KNeighborsClassifier(**params)
-    elif name in ['xgbclassifier', 'xgb']:
+    elif name in ["xgbclassifier", "xgb"]:
         return XGBClassifier(**params)
     else:
-        raise ValueError(f"Classifier '{name}' is not supported. Please choose from: "
-                         "'randomforestclassifier', 'logisticregression', 'decisiontreeclassifier', "
-                         "'svc', 'kneighborsclassifier', 'gradientboostingclassifier', 'xgbclassifier'.")
+        raise ValueError(
+            f"Classifier '{name}' is not supported. Please choose from: "
+            "'randomforestclassifier', 'logisticregression', 'decisiontreeclassifier', "
+            "'svc', 'kneighborsclassifier', 'gradientboostingclassifier', 'xgbclassifier'."
+        )
+
 
 def get_regressor_instance(name: str, params: dict):
     """
     Returns an instance of a regressor given its name and parameters.
     """
     name = name.lower()
-    if name in ['randomforestregressor', 'rf']:
+    if name in ["randomforestregressor", "rf"]:
         return RandomForestRegressor(**params)
-    elif name in ['linearregression', 'lr']:
+    elif name in ["linearregression", "lr"]:
         return LinearRegression(**params)
-    elif name in ['decisiontreeregressor', 'dt']:
+    elif name in ["decisiontreeregressor", "dt"]:
         return DecisionTreeRegressor(**params)
-    elif name in ['svr']:
+    elif name in ["svr"]:
         return SVR(**params)
-    elif name in ['kneighborsregressor', 'knn']:
+    elif name in ["kneighborsregressor", "knn"]:
         return KNeighborsRegressor(**params)
-    elif name in ['xgbregressor', 'xgb']:
+    elif name in ["xgbregressor", "xgb"]:
         return XGBRegressor(**params)
-    elif name in ['gradientboostingregressor', 'gbr']:
+    elif name in ["gradientboostingregressor", "gbr"]:
         return GradientBoostingRegressor(**params)
     else:
-        raise ValueError(f"Regressor '{name}' is not supported. Please choose from: "
-                         "'randomforestregressor', 'linearregression', 'decisiontreeregressor', "
-                         "'svr', 'kneighborsregressor', 'xgbregressor', 'gradientboostingregressor'.")
+        raise ValueError(
+            f"Regressor '{name}' is not supported. Please choose from: "
+            "'randomforestregressor', 'linearregression', 'decisiontreeregressor', "
+            "'svr', 'kneighborsregressor', 'xgbregressor', 'gradientboostingregressor'."
+        )
+
 
 class TwoStageModel(BaseEstimator):
     """
@@ -74,11 +82,14 @@ class TwoStageModel(BaseEstimator):
     The predict method returns an array of shape (n_samples, n_outputs) where for each row,
     the regressor's prediction is assigned to the columns marked active by the classifier (and 0 otherwise).
     """
-    def __init__(self, 
-                 clf_name='randomforestclassifier', 
-                 reg_name='xgbregressor', 
-                 clf_params=None, 
-                 reg_params=None):
+
+    def __init__(
+        self,
+        clf_name="randomforestclassifier",
+        reg_name="xgbregressor",
+        clf_params=None,
+        reg_params=None,
+    ):
         self.clf_name = clf_name
         self.reg_name = reg_name
         self.clf_params = clf_params if clf_params is not None else {}
@@ -89,7 +100,7 @@ class TwoStageModel(BaseEstimator):
     def fit(self, X, y):
         """
         Fit the two-stage model.
-        
+
         Parameters:
           X: array-like of shape (n_samples, n_features)
           y: tuple (y_classif, y_reg) where:
@@ -105,7 +116,9 @@ class TwoStageModel(BaseEstimator):
         # Ensure y_reg is 1D.
         y_reg = np.ravel(y_reg)
         # Apply sample weighting
-        if not isinstance(self.reg, KNeighborsRegressor) and not isinstance(self.reg, SVR):
+        if not isinstance(self.reg, KNeighborsRegressor) and not isinstance(
+            self.reg, SVR
+        ):
             sample_weight = np.where(y_reg > 0.5, 1.2, 1.0)
             self.reg.fit(X, y_reg, sample_weight=sample_weight)
         else:
@@ -115,12 +128,12 @@ class TwoStageModel(BaseEstimator):
     def predict(self, X):
         """
         Predict using the two-stage model.
-        
+
         First, the classifier predicts which columns are active.
         Then, the regressor predicts the scalar value.
         The final prediction assigns the regressor's value to active columns (1)
         and 0 to inactive columns.
-        
+
         Returns:
           y_pred: array of shape (n_samples, n_outputs)
         """
@@ -134,87 +147,17 @@ class TwoStageModel(BaseEstimator):
         return y_pred
 
 
-class TwoStageRandomForest(BaseEstimator):
-    """
-    A scikit-learn compatible estimator for a two-stage prediction task.
-
-    It wraps two separate models:
-      - A multi-label RandomForestClassifier that predicts which columns are active.
-      - A RandomForestRegressor that predicts the scalar value for the active columns.
-
-    The fit method expects y to be a tuple: (y_classif, y_reg), where:
-      - y_classif: Binary targets of shape (n_samples, n_outputs) for the classifier.
-      - y_reg: Regression targets of shape (n_samples,) or (n_samples, 1) for the regressor.
-
-    The predict method returns an array of shape (n_samples, n_outputs) where for each row,
-    the regressor's prediction is assigned to the columns marked active by the classifier (and 0 otherwise).
-    """
-
-    def __init__(self, clf_params=None, reg_params=None):
-        # Set default hyperparameters if none provided.
-        self.clf_params = clf_params if clf_params is not None else {}
-        self.reg_params = reg_params if reg_params is not None else {}
-        self.clf = XGBClassifier(**self.clf_params)
-        self.reg = XGBRegressor(**self.reg_params)
-        # RandomForestRegressor(**self.reg_params)
-
-    def fit(self, X, y):
-        """
-        Fit the two-stage model.
-
-        Parameters:
-        - X: array-like of shape (n_samples, n_features)
-        - y: tuple (y_classif, y_reg) where:
-            y_classif: array-like of shape (n_samples, n_outputs) with binary targets.
-            y_reg: array-like of shape (n_samples,) or (n_samples, 1) with regression targets.
-        """
-        if not (isinstance(y, (tuple, list)) and len(y) == 2):
-            raise ValueError("y must be a tuple: (y_classif, y_reg)")
-
-        y_classif, y_reg = y
-
-        # Fit the classifier on the multi-label binary targets.
-        self.clf.fit(X, y_classif)
-        # Ensure y_reg is a 1D array.
-        y_reg = np.ravel(y_reg)
-        sample_weight = np.where(y_reg > 0.5, 1.2, 1.0)
-        self.reg.fit(X, y_reg, sample_weight=sample_weight)
-        return self
-
-    def predict(self, X):
-        """
-        Predict using the two-stage model.
-
-        First, predicts which columns are active using the classifier.
-        Then, predicts the scalar value using the regressor.
-        Finally, combines them: assigns the regressor's prediction to the columns marked active (1)
-        and 0 to the inactive ones.
-
-        Returns:
-        - y_pred: array of shape (n_samples, n_outputs)
-        """
-        # Predict active/inactive columns (binary mask)
-        y_classif_pred = self.clf.predict(X)
-        # Predict the regression value for each sample
-        y_reg_pred = self.reg.predict(X)
-
-        # Ensure y_classif_pred is 2D (if only one target, reshape accordingly)
-        if y_classif_pred.ndim == 1:
-            y_classif_pred = y_classif_pred.reshape(-1, 1)
-
-        # Combine the predictions: multiply binary mask with regressor's prediction broadcast across columns.
-        y_pred = y_classif_pred * y_reg_pred[:, np.newaxis]
-        return y_pred
-
-
-def train_two_stage_model(x_train, y_train, 
-                          clf_name='randomforestclassifier', 
-                          reg_name='xgbregressor', 
-                          clf_params=None, 
-                          reg_params=None):
+def train_two_stage_model(
+    x_train,
+    y_train,
+    clf_name="randomforestclassifier",
+    reg_name="xgbregressor",
+    clf_params=None,
+    reg_params=None,
+):
     """
     Train the two-stage model.
-    
+
     Parameters:
       x_train: DataFrame or array-like of shape (n_samples, n_features)
       y_train: tuple (y_classif, y_reg) with training targets.
@@ -222,7 +165,7 @@ def train_two_stage_model(x_train, y_train,
       reg_name: String name of the regressor to use.
       clf_params: Optional dict of parameters for the classifier.
       reg_params: Optional dict of parameters for the regressor.
-      
+
     Returns:
       model: Trained TwoStageModel instance.
     """
@@ -245,14 +188,21 @@ def train_two_stage_model(x_train, y_train,
             "random_state": 29,
             "n_jobs": -1,
         }
-    model = TwoStageModel(clf_name=clf_name, 
-                          reg_name=reg_name, 
-                          clf_params=clf_params, 
-                          reg_params=reg_params)
+    model = TwoStageModel(
+        clf_name=clf_name,
+        reg_name=reg_name,
+        clf_params=clf_params,
+        reg_params=reg_params,
+    )
     # Optionally remove an "ID" column if present.
-    X_train = x_train.drop("ID", axis=1) if hasattr(x_train, "columns") and "ID" in x_train.columns else x_train
+    X_train = (
+        x_train.drop("ID", axis=1)
+        if hasattr(x_train, "columns") and "ID" in x_train.columns
+        else x_train
+    )
     model.fit(X_train, y_train)
     return model
+
 
 def run_experiment(
     x_train,
@@ -263,14 +213,14 @@ def run_experiment(
     y_val,
     y_val_classif,
     y_val_reg,
-    clf_name='randomforestclassifier',
-    reg_name='xgbregressor',
+    clf_name="randomforestclassifier",
+    reg_name="xgbregressor",
     clf_params=None,
     reg_params=None,
 ):
     """
     Runs the full experiment: training the model and evaluating it on validation data.
-    
+
     Parameters:
       x_train (DataFrame): Training features.
       y_train (DataFrame): Training targets.
@@ -284,7 +234,7 @@ def run_experiment(
       reg_name (str): String name for the regressor.
       clf_params (dict): Optional parameters for the classifier.
       reg_params (dict): Optional parameters for the regressor.
-      
+
     Returns:
       model: Trained TwoStageModel instance.
     """
@@ -301,8 +251,12 @@ def run_experiment(
     metric_val = evaluate_model(model, x_val, y_val)
     print(f"Training Weighted RMSE: {metric_train:.4f}")
     print(f"Validation Weighted RMSE: {metric_val:.4f}")
-    
-    X_val_features = x_val.drop("ID", axis=1) if hasattr(x_val, "columns") and "ID" in x_val.columns else x_val
+
+    X_val_features = (
+        x_val.drop("ID", axis=1)
+        if hasattr(x_val, "columns") and "ID" in x_val.columns
+        else x_val
+    )
     y_pred = model.clf.predict(X_val_features)
     accuracy = np.mean(y_pred == y_val_classif)
     print(f"Validation Accuracy of Classifier: {accuracy:.4f}")
@@ -310,7 +264,19 @@ def run_experiment(
     return model
 
 
-def benchmark_2s_model_grid(x_train, y_train, y_train_classif, y_train_reg, x_val, y_val, y_val_classif, y_val_reg, model_grid=None, verbose=True, subset_humidity=False):
+def benchmark_2s_model_grid(
+    x_train,
+    y_train,
+    y_train_classif,
+    y_train_reg,
+    x_val,
+    y_val,
+    y_val_classif,
+    y_val_reg,
+    model_grid=None,
+    verbose=True,
+    subset_humidity=False,
+):
     """
     Benchmark all combinations of classifier and regressor specified in model_grid.
 
@@ -344,8 +310,12 @@ def benchmark_2s_model_grid(x_train, y_train, y_train_classif, y_train_reg, x_va
             "reg_names": ["xgbregressor", "randomforestregressor"],
         }
     # Use provided parameter dicts or default to empty dicts.
-    clf_params_grid = model_grid.get("clf_params", {name: {} for name in model_grid["clf_names"]})
-    reg_params_grid = model_grid.get("reg_params", {name: {} for name in model_grid["reg_names"]})
+    clf_params_grid = model_grid.get(
+        "clf_params", {name: {} for name in model_grid["clf_names"]}
+    )
+    reg_params_grid = model_grid.get(
+        "reg_params", {name: {} for name in model_grid["reg_names"]}
+    )
 
     best_val_rmse = float("inf")
     best_model = None
@@ -357,7 +327,9 @@ def benchmark_2s_model_grid(x_train, y_train, y_train_classif, y_train_reg, x_va
         humidity_subsets = create_humidity_subsets(x_val, y_val)
 
     # Create all model combinations.
-    model_combinations = list(itertools.product(model_grid["clf_names"], model_grid["reg_names"]))
+    model_combinations = list(
+        itertools.product(model_grid["clf_names"], model_grid["reg_names"])
+    )
     model_combinations = tqdm(model_combinations, desc="Model Grid Search")
 
     for clf_name, reg_name in model_combinations:
@@ -365,7 +337,14 @@ def benchmark_2s_model_grid(x_train, y_train, y_train_classif, y_train_reg, x_va
         reg_params = reg_params_grid.get(reg_name, {})
 
         # Instantiate and train the two-stage model.
-        model = train_two_stage_model(x_train, (y_train_classif, y_train_reg), clf_name, reg_name, clf_params, reg_params)
+        model = train_two_stage_model(
+            x_train,
+            (y_train_classif, y_train_reg),
+            clf_name,
+            reg_name,
+            clf_params,
+            reg_params,
+        )
         train_rmse = evaluate_model(model, x_train, y_train)
         val_rmse = evaluate_model(model, x_val, y_val)
         pred_val = model.clf.predict(x_val.drop("ID", axis=1))
@@ -384,8 +363,10 @@ def benchmark_2s_model_grid(x_train, y_train, y_train_classif, y_train_reg, x_va
             best_accuracy = accuracy
 
         if verbose:
-            print(f"\nModel Combination: Classifier '{clf_name}' | "
-                  f"Regressor '{reg_name}'")
+            print(
+                f"\nModel Combination: Classifier '{clf_name}' | "
+                f"Regressor '{reg_name}'"
+            )
             print(f"Training Weighted RMSE: {train_rmse:.4f}")
             print(f"Validation Weighted RMSE: {val_rmse:.4f}")
             print(f"Validation Accuracy of Classifier: {accuracy:.4f}")
@@ -395,10 +376,14 @@ def benchmark_2s_model_grid(x_train, y_train, y_train_classif, y_train_reg, x_va
                 for i, (x_subset, y_subset) in enumerate(humidity_subsets):
                     subset_rmse = evaluate_model(model, x_subset, y_subset)
                     humidity_range = f"[{i*0.2:.1f}, {(i+1)*0.2:.1f}]"
-                    print(f"Humidity {humidity_range}: RMSE = {subset_rmse:.4f} (n={len(x_subset)})")
+                    print(
+                        f"Humidity {humidity_range}: RMSE = {subset_rmse:.4f} (n={len(x_subset)})"
+                    )
                     preds = model.clf.predict(x_subset.drop("ID", axis=1))
                     subset_accuracy = np.mean(preds == y_subset[0])
-                    print(f"Humidity {humidity_range}: Accuracy = {subset_accuracy:.4f} (n={len(x_subset)})")
+                    print(
+                        f"Humidity {humidity_range}: Accuracy = {subset_accuracy:.4f} (n={len(x_subset)})"
+                    )
             print("-" * 50)
 
     if verbose:
@@ -411,17 +396,33 @@ def benchmark_2s_model_grid(x_train, y_train, y_train_classif, y_train_reg, x_va
             for i, (x_subset, y_subset) in enumerate(humidity_subsets):
                 subset_rmse = evaluate_model(best_model, x_subset, y_subset)
                 humidity_range = f"[{i*0.2:.1f}, {(i+1)*0.2:.1f}]"
-                print(f"Humidity {humidity_range}: RMSE = {subset_rmse:.4f} (n={len(x_subset)})")
+                print(
+                    f"Humidity {humidity_range}: RMSE = {subset_rmse:.4f} (n={len(x_subset)})"
+                )
                 preds = best_model.clf.predict(x_subset.drop("ID", axis=1))
                 subset_accuracy = np.mean(preds == y_subset[0])
-                print(f"Humidity {humidity_range}: Accuracy = {subset_accuracy:.4f} (n={len(x_subset)})")
+                print(
+                    f"Humidity {humidity_range}: Accuracy = {subset_accuracy:.4f} (n={len(x_subset)})"
+                )
 
     return best_model, best_params, best_val_rmse
 
 
-def benchmark_2s_param_grid(x_train, y_train, y_train_classif, y_train_reg, x_val, y_val, y_val_classif, y_val_reg,
-                         clf_name, reg_name,
-                         param_grid=None, verbose=True, subset_humidity=False):
+def benchmark_2s_param_grid(
+    x_train,
+    y_train,
+    y_train_classif,
+    y_train_reg,
+    x_val,
+    y_val,
+    y_val_classif,
+    y_val_reg,
+    clf_name,
+    reg_name,
+    param_grid=None,
+    verbose=True,
+    subset_humidity=False,
+):
     """
     Benchmark different hyperparameter combinations for a fixed classifier/regressor pair.
 
@@ -469,7 +470,7 @@ def benchmark_2s_param_grid(x_train, y_train, y_train_classif, y_train_reg, x_va
                 "max_depth": [7, 10, 15],
                 "min_samples_split": [0.005, 0.01, 0.02],
                 "min_samples_leaf": [10, 20, 30, 50],
-            }
+            },
         }
 
     # Create all combinations of parameters for classifier and regressor.
@@ -483,7 +484,11 @@ def benchmark_2s_param_grid(x_train, y_train, y_train_classif, y_train_reg, x_va
     ]
 
     # Add fixed parameters.
-    fixed_params = {"random_state": 29, "n_jobs": -1} if (clf_name != "kneighborsclassifier" and reg_name != "kneighborsregressor") else {"n_jobs": -1}
+    fixed_params = (
+        {"random_state": 29, "n_jobs": -1}
+        if (clf_name != "kneighborsclassifier" and reg_name != "kneighborsregressor")
+        else {"n_jobs": -1}
+    )
     for params in clf_param_list:
         params.update(fixed_params)
     for params in reg_param_list:
@@ -504,7 +509,14 @@ def benchmark_2s_param_grid(x_train, y_train, y_train_classif, y_train_reg, x_va
 
     for clf_params, reg_params in param_combinations:
         # Instantiate and train the two-stage model.
-        model = train_two_stage_model(x_train, (y_train_classif, y_train_reg), clf_name, reg_name, clf_params, reg_params)
+        model = train_two_stage_model(
+            x_train,
+            (y_train_classif, y_train_reg),
+            clf_name,
+            reg_name,
+            clf_params,
+            reg_params,
+        )
 
         train_rmse = evaluate_model(model, x_train, y_train)
         val_rmse = evaluate_model(model, x_val, y_val)
@@ -518,7 +530,9 @@ def benchmark_2s_param_grid(x_train, y_train, y_train_classif, y_train_reg, x_va
             best_params = {"clf_params": clf_params, "reg_params": reg_params}
 
         if verbose:
-            print(f"\nParameters:\n Classifier params: {clf_params} \n Regressor params: {reg_params}")
+            print(
+                f"\nParameters:\n Classifier params: {clf_params} \n Regressor params: {reg_params}"
+            )
             print(f"Training Weighted RMSE: {train_rmse:.4f}")
             print(f"Validation Weighted RMSE: {val_rmse:.4f}")
             print(f"Validation Accuracy of Classifier: {accuracy:.4f}")
@@ -528,10 +542,14 @@ def benchmark_2s_param_grid(x_train, y_train, y_train_classif, y_train_reg, x_va
                 for i, (x_subset, y_subset) in enumerate(humidity_subsets):
                     subset_rmse = evaluate_model(model, x_subset, y_subset)
                     humidity_range = f"[{i*0.2:.1f}, {(i+1)*0.2:.1f}]"
-                    print(f"Humidity {humidity_range}: RMSE = {subset_rmse:.4f} (n={len(x_subset)})")
+                    print(
+                        f"Humidity {humidity_range}: RMSE = {subset_rmse:.4f} (n={len(x_subset)})"
+                    )
                     preds = model.clf.predict(x_subset.drop("ID", axis=1))
                     subset_accuracy = np.mean(preds == y_subset[0])
-                    print(f"Humidity {humidity_range}: Accuracy = {subset_accuracy:.4f} (n={len(x_subset)})")
+                    print(
+                        f"Humidity {humidity_range}: Accuracy = {subset_accuracy:.4f} (n={len(x_subset)})"
+                    )
             print("-" * 50)
 
     if verbose:
@@ -544,9 +562,13 @@ def benchmark_2s_param_grid(x_train, y_train, y_train_classif, y_train_reg, x_va
             for i, (x_subset, y_subset) in enumerate(humidity_subsets):
                 subset_rmse = evaluate_model(best_model, x_subset, y_subset)
                 humidity_range = f"[{i*0.2:.1f}, {(i+1)*0.2:.1f}]"
-                print(f"Humidity {humidity_range}: RMSE = {subset_rmse:.4f} (n={len(x_subset)})")
+                print(
+                    f"Humidity {humidity_range}: RMSE = {subset_rmse:.4f} (n={len(x_subset)})"
+                )
                 preds = best_model.clf.predict(x_subset.drop("ID", axis=1))
                 subset_accuracy = np.mean(preds == y_subset[0])
-                print(f"Humidity {humidity_range}: Accuracy = {subset_accuracy:.4f} (n={len(x_subset)})")
+                print(
+                    f"Humidity {humidity_range}: Accuracy = {subset_accuracy:.4f} (n={len(x_subset)})"
+                )
 
     return best_model, best_params, best_val_rmse

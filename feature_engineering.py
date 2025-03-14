@@ -1,55 +1,30 @@
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import PolynomialFeatures
 from sklearn.feature_selection import SelectKBest, f_regression, mutual_info_regression
 from sklearn.decomposition import PCA
 
 
-def create_polynomial_features(
-    df, degree=2, include_bias=False, interaction_only=False
-):
+def create_power_features(df, degree=2):
     """
-    Creates polynomial features from the input dataframe.
+    Creates power features from the input dataframe.
 
     Parameters:
         df (DataFrame): Input dataframe with features
-        degree (int): Degree of polynomial features
-        include_bias (bool): Whether to include bias column of 1's
-        interaction_only (bool): If True, only interaction features are produced
-
+        degree (int): Power of features
     Returns:
         DataFrame: Original dataframe with polynomial features added
     """
-    # Preserve ID and Humidity columns
-    id_col = None
-    humidity_col = None
-
-    if "ID" in df.columns:
-        id_col = df["ID"].copy()
-        df = df.drop(columns=["ID"])
-
-    if "Humidity" in df.columns:
-        humidity_col = df["Humidity"].copy()
-        df = df.drop(columns=["Humidity"])
-
-    # Create polynomial features
-    poly = PolynomialFeatures(
-        degree=degree, include_bias=include_bias, interaction_only=interaction_only
-    )
-    poly_features = poly.fit_transform(df)
-
-    # Create dataframe with new feature names
-    feature_names = poly.get_feature_names_out(df.columns)
-    df_poly = pd.DataFrame(poly_features, columns=feature_names)
-
-    # Add back ID and Humidity columns
-    if id_col is not None:
-        df_poly["ID"] = id_col
-
-    if humidity_col is not None:
-        df_poly["Humidity"] = humidity_col
-
-    return df_poly
+    if degree < 2:
+        return df
+    transformed_df = df.copy()
+    for col in df.columns:
+        if col == "ID":
+            continue
+        for d in range(2, degree + 1):
+            transformed_df[f"{col}_power_{d}"] = df[col] ** d
+    for d in range(2, degree + 1):
+        transformed_df[f"Humidity_root_{d}"] = np.abs(df["Humidity"]) ** (1 / d)
+    return transformed_df
 
 
 def create_sensor_group_interactions(df):
@@ -123,9 +98,11 @@ def create_humidity_interactions(df):
     if "Humidity" not in df.columns:
         return df_result
 
-    # Create humidity transformations
-    df_result["Humidity_squared"] = df_result["Humidity"] ** 2
-    df_result["Humidity_sqrt"] = np.sqrt(np.abs(df_result["Humidity"]) + 1e-8)
+    # Create humidity transformations if not already present
+    if "Humidity_power_2" not in df.columns:
+        df_result["Humidity_power_2"] = df_result["Humidity"] ** 2
+    if "Humidity_root_2" not in df.columns:
+        df_result["Humidity_root_2"] = np.sqrt(np.abs(df_result["Humidity"]))
 
     # Create interactions with sensor groups
     sensor_cols = [col for col in df.columns if col not in ["ID", "Humidity"]]
@@ -197,7 +174,7 @@ def select_features(X, y, method="mutual_info", k=20):
 def apply_feature_engineering(
     df,
     target_df=None,
-    polynomial_degree=2,
+    power_degree=2,
     include_group_interactions=True,
     include_humidity_interactions=True,
     feature_selection=True,
@@ -209,7 +186,7 @@ def apply_feature_engineering(
     Parameters:
         df (DataFrame): Input dataframe with features
         target_df (DataFrame, optional): Target dataframe for feature selection
-        polynomial_degree (int): Degree for polynomial features
+        power_degree (int): Degree for power features
         include_group_interactions (bool): Whether to include sensor group interactions
         include_humidity_interactions (bool): Whether to include humidity interactions
         feature_selection (bool): Whether to perform feature selection
@@ -219,7 +196,6 @@ def apply_feature_engineering(
         DataFrame: Dataframe with engineered features
     """
     result_df = df.copy()
-
     # Step 1: Create sensor group interactions
     if include_group_interactions:
         result_df = create_sensor_group_interactions(result_df)
@@ -228,29 +204,24 @@ def apply_feature_engineering(
     if include_humidity_interactions and "Humidity" in result_df.columns:
         result_df = create_humidity_interactions(result_df)
 
-    # Step 3: Create polynomial features (only for non-aggregated features to avoid explosion)
-    if polynomial_degree > 1:
-        # Select only original sensor columns for polynomial features to avoid feature explosion
-        sensor_cols = [col for col in df.columns if col not in ["ID", "Humidity"]]
+    # Step 3: Create power features (only for non-aggregated features to avoid explosion)
+    if power_degree > 1:
+        sensor_cols = [col for col in df.columns if col != "ID"]
         if sensor_cols:
-            poly_df = create_polynomial_features(
+            poly_df = create_power_features(
                 df[sensor_cols],
-                degree=polynomial_degree,
-                include_bias=False,
-                interaction_only=True,  # Only interactions, not all polynomials
+                degree=power_degree,
             )
-
-            # Add ID and Humidity back if they exist
+            # Add ID back if they exist
             if "ID" in df.columns:
                 poly_df["ID"] = df["ID"]
-            if "Humidity" in df.columns:
-                poly_df["Humidity"] = df["Humidity"]
 
             # Merge with result_df, keeping only new polynomial features
             original_cols = result_df.columns
-            result_df = pd.merge(
-                result_df, poly_df, on=["ID"] if "ID" in df.columns else None
-            )
+            result_df = poly_df
+            # pd.merge(
+            #    result_df, poly_df, on=["ID"] if "ID" in df.columns else None
+            # )
             # Remove duplicate columns that might have been added
             result_df = result_df.loc[:, ~result_df.columns.duplicated()]
 

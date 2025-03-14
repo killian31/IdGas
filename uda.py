@@ -38,11 +38,7 @@ class DomainDiscriminator(nn.Module):
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dim, hidden_dim // 2, bias=bias),
-            nn.BatchNorm1d(hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dim // 2, 1, bias=bias),
+            nn.Linear(hidden_dim, 1, bias=bias),
             nn.Sigmoid(),  # Output is probability: 0 = source, 1 = target.
         )
 

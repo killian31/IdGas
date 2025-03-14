@@ -209,7 +209,7 @@ def full_pipeline(
     reduce_features=False,
     augment=False,
     apply_feat_eng=False,
-    polynomial_degree=2,
+    power_degree=2,
     include_group_interactions=True,
     include_humidity_interactions=True,
     feature_selection=False,
@@ -219,6 +219,7 @@ def full_pipeline(
     binarize_humidity=False,
     n_bins=10,
     remove_humidity=False,
+    cut_low_humidity=False,
 ):
     """
     Full pipeline function that:
@@ -285,25 +286,53 @@ def full_pipeline(
         # Keep only corresponding rows in df_y if available
         if df_y is not None:
             df_y = df_y[df_y["ID"].isin(df_x["ID"])]
+
     if rescale:
         df_x_processed = preprocess_data(df_x)
     else:
         df_x_processed = df_x
-    if reduce_features:
-        df_x_processed = group_measures(df_x_processed)
-
     # Apply feature engineering if requested
     if apply_feat_eng:
         df_x_processed = apply_feature_engineering(
             df_x_processed,
             target_df=df_y,  # Pass None for inference
-            polynomial_degree=polynomial_degree,
+            power_degree=power_degree,
             include_group_interactions=include_group_interactions,
             include_humidity_interactions=include_humidity_interactions,
-            feature_selection=feature_selection
-            and df_y is not None,  # Only do feature selection if we have labels
+            feature_selection=feature_selection and df_y is not None,
             k_features=k_features,
         )
+
+    if cut_low_humidity:
+        # Find rows with low humidity
+        low_humidity_mask = df_x_processed["Humidity"] < 0.01
+        low_humidity_count = low_humidity_mask.sum()
+        total_count = len(df_x_processed)
+
+        # Calculate how many low humidity samples to keep
+        target_low_humidity_count = int(total_count * 0.2)
+        samples_to_remove = low_humidity_count - target_low_humidity_count
+
+        if samples_to_remove > 0:
+            # Get indices of low humidity samples
+            low_humidity_indices = df_x_processed.index[low_humidity_mask].tolist()
+            # Randomly select indices to remove
+            indices_to_remove = np.random.choice(
+                low_humidity_indices, size=samples_to_remove, replace=False
+            )
+            df_x_removed = df_x_processed.loc[indices_to_remove]
+            df_y_removed = None
+            # If we have labels, make sure to remove corresponding rows
+            if df_y is not None:
+                df_y_removed = df_y[df_y["ID"].isin(df_x_removed["ID"])]
+                df_y = df_y[
+                    ~df_y["ID"].isin(df_x_processed.loc[indices_to_remove, "ID"])
+                ]
+            # Remove selected rows
+            df_x_processed = df_x_processed.drop(indices_to_remove)
+
+    if reduce_features:
+        df_x_processed = group_measures(df_x_processed)
 
     # If no labels provided, return processed features
     if df_y is None:
@@ -315,7 +344,6 @@ def full_pipeline(
     feature_columns = [col for col in df_x_processed.columns if col != "ID"]
     X = df_merged[["ID"] + feature_columns]
     y = df_merged[target_columns]
-
     assert not (
         split and split_humidity
     ), "Cannot split and split_humidity at the same time"
@@ -404,6 +432,9 @@ def full_pipeline(
         x_train = pd.concat([x_train, augmented_features], ignore_index=True)
         y_train = pd.concat([y_train, augmented_labels], ignore_index=True)
 
+    if cut_low_humidity:
+        x_val = pd.concat([x_val, df_x_removed], ignore_index=True)
+        y_val = pd.concat([y_val, df_y_removed.drop("ID", axis=1)], ignore_index=True)
     return x_train, y_train, x_val, y_val
 
 

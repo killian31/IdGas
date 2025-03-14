@@ -4,13 +4,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
 
 
 from data_preprocessing import splits_to_dataloaders
 from residual_attention_net import RAMTNet
 from uda import GradientReversal, DomainDiscriminator
 from data_preprocessing import full_pipeline
-from utils import write_submissions
+from utils import write_submissions, WarmupScheduler
 
 
 class StackEnsemble(nn.Module):
@@ -410,11 +411,11 @@ class BasicDeepRegressor(nn.Module):
 class SensorCNN(nn.Module):
     def __init__(
         self,
-        input_dim=13,  
-        embed_dim=32,   
-        conv_channels=64,  
-        final_dim=32,     
-        num_output=23,     
+        input_dim=13,
+        embed_dim=32,
+        conv_channels=64,
+        final_dim=32,
+        num_output=23,
         dropout_rate=0.3,
     ):
         super(SensorCNN, self).__init__()
@@ -422,13 +423,30 @@ class SensorCNN(nn.Module):
         self.dropout = nn.Dropout(dropout_rate)
         self.linear_in = nn.Linear(input_dim, embed_dim)
 
-        self.conv1 = nn.Conv1d(in_channels=1, out_channels=conv_channels // 8, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv1d(
+            in_channels=1, out_channels=conv_channels // 8, kernel_size=3, padding=1
+        )
         self.bn1 = nn.BatchNorm1d(conv_channels // 8)
-        self.conv2 = nn.Conv1d(in_channels=conv_channels // 8, out_channels=conv_channels // 4, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(
+            in_channels=conv_channels // 8,
+            out_channels=conv_channels // 4,
+            kernel_size=3,
+            padding=1,
+        )
         self.bn2 = nn.BatchNorm1d(conv_channels // 4)
-        self.conv3 = nn.Conv1d(in_channels=conv_channels // 4, out_channels=conv_channels // 2, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv1d(
+            in_channels=conv_channels // 4,
+            out_channels=conv_channels // 2,
+            kernel_size=3,
+            padding=1,
+        )
         self.bn3 = nn.BatchNorm1d(conv_channels // 2)
-        self.conv4 = nn.Conv1d(in_channels=conv_channels // 2, out_channels=conv_channels, kernel_size=3, padding=1)
+        self.conv4 = nn.Conv1d(
+            in_channels=conv_channels // 2,
+            out_channels=conv_channels,
+            kernel_size=3,
+            padding=1,
+        )
         self.bn4 = nn.BatchNorm1d(conv_channels)
 
         self.fusion_fc = nn.Linear(conv_channels * embed_dim, final_dim)
@@ -440,33 +458,33 @@ class SensorCNN(nn.Module):
         x: (batch_size, 13)  ->  linear_in -> (batch_size, embed_dim)
         Then reshape for conv: (batch_size, 1, embed_dim)
         """
-        x = self.linear_in(x)             
+        x = self.linear_in(x)
         x = F.relu(x)
-        x = x.unsqueeze(1)                      
+        x = x.unsqueeze(1)
 
-        x = self.conv1(x)                
+        x = self.conv1(x)
         x = self.bn1(x)
         x = F.relu(x)
         x = self.dropout(x)
-        x = self.conv2(x)                    
+        x = self.conv2(x)
         x = self.bn2(x)
         x = F.relu(x)
         x = self.dropout(x)
-        x = self.conv3(x)                       
+        x = self.conv3(x)
         x = self.bn3(x)
         x = F.relu(x)
         x = self.dropout(x)
-        x = self.conv4(x)                       
+        x = self.conv4(x)
         x = self.bn4(x)
         x = F.relu(x)
         x = self.dropout(x)
 
-        x = x.view(x.size(0), -1)               
-        x = self.fusion_fc(x)                 
+        x = x.view(x.size(0), -1)
+        x = self.fusion_fc(x)
         x = F.relu(x)
         x = self.dropout(x)
 
-        x = self.output_layer(x)                
+        x = self.output_layer(x)
         return x
 
 
@@ -519,7 +537,7 @@ def train_nn_regressor(model, train_loader, optimizer, criterion, device):
         output = model(data)
         loss = criterion(output, target)
         loss.backward()
-        #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         train_loss += loss.item()
     return train_loss / len(train_loader)
@@ -547,8 +565,9 @@ def train_nn_regressor_uda(
     optimizer_disc,
     criterion,
     domain_criterion,
-    lambda_domain,
     device,
+    epoch,
+    warmup_epochs,
 ):
     model.train()
     domain_disc.train()
@@ -568,14 +587,14 @@ def train_nn_regressor_uda(
             source_iter = iter(source_loader)
             source_data, source_target = next(source_iter)
 
-        try:
-            target_data, _ = next(target_iter)
-        except StopIteration:
-            target_iter = iter(target_loader)
-            target_data, _ = next(target_iter)
-
+        if epoch >= warmup_epochs:
+            try:
+                target_data, _ = next(target_iter)
+            except StopIteration:
+                target_iter = iter(target_loader)
+                target_data, _ = next(target_iter)
+            target_data = target_data.to(device)
         source_data, source_target = source_data.to(device), source_target.to(device)
-        target_data = target_data.to(device)
 
         # --- Forward pass for source samples ---
         # Obtain latent features using the encoder (inside RegressorV3)
@@ -585,41 +604,51 @@ def train_nn_regressor_uda(
 
         # --- Domain Discriminator Loss ---
         # Get latent features for target samples
-        fused_target = model.encoder(target_data)
-        # Combine source and target latent features
-        combined = torch.cat([fused_source, fused_target], dim=0)
-        # Domain labels: 0 for source, 1 for target
-        domain_labels = torch.cat(
-            [torch.zeros(fused_source.size(0)), torch.ones(fused_target.size(0))], dim=0
-        ).to(device)
-        # Pass through GRL then domain discriminator
-        reversed_features = grl(combined)
-        domain_preds = domain_disc(reversed_features)
-        loss_domain = domain_criterion(domain_preds.view(-1), domain_labels)
+        if epoch >= warmup_epochs:
+            fused_target = model.encoder(target_data)
+            # Combine source and target latent features
+            combined = torch.cat([fused_source, fused_target], dim=0)
+            # Domain labels: 0 for source, 1 for target
+            domain_labels = torch.cat(
+                [torch.zeros(fused_source.size(0)), torch.ones(fused_target.size(0))],
+                dim=0,
+            ).to(device)
+            # Pass through GRL then domain discriminator
+            reversed_features = grl(combined)
+            domain_preds = domain_disc(reversed_features)
+            loss_domain = domain_criterion(domain_preds.view(-1), domain_labels)
 
-        # --- Total Loss ---
-        total_loss = loss_reg + lambda_domain * loss_domain
-
+            # --- Total Loss ---
+            total_loss = loss_reg + loss_domain
+        else:
+            total_loss = loss_reg
         optimizer.zero_grad()
-        optimizer_disc.zero_grad()
+        if epoch >= warmup_epochs:
+            optimizer_disc.zero_grad()
         total_loss.backward()
         # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         # torch.nn.utils.clip_grad_norm_(domain_disc.parameters(), max_norm=1.0)
         optimizer.step()
-        optimizer_disc.step()
+        if epoch >= warmup_epochs:
+            optimizer_disc.step()
 
         train_loss += total_loss.item()
-        disc_loss += loss_domain.item()
-        reg_loss += loss_reg.item()
-        predicted = (domain_preds.view(-1) > 0.5).float()
-        total += domain_labels.size(0)
-        disc_correct += (predicted == domain_labels.view(-1)).sum().item()
-
+        if epoch >= warmup_epochs:
+            with torch.no_grad():
+                disc_loss += loss_domain.item()
+                reg_loss += loss_reg.item()
+                predicted = (domain_preds.view(-1) > 0.5).float()
+                total += domain_labels.size(0)
+                disc_correct += (predicted == domain_labels.view(-1)).sum().item()
     return (
         train_loss / len(source_loader),
         disc_loss / len(source_loader),
-        reg_loss / len(source_loader),
-        disc_correct / total,
+        (
+            reg_loss / len(source_loader)
+            if epoch >= warmup_epochs
+            else train_loss / len(source_loader)
+        ),
+        disc_correct / total if epoch >= warmup_epochs else 0,
     )
 
 
@@ -643,6 +672,167 @@ def instantiate_model(model_class, model_params):
     return model
 
 
+def compute_embeddings(model, x_train=None, x_val=None, x_test=None):
+    if x_train is None and x_val is None and x_test is None:
+        return None
+    model.eval()
+    with torch.no_grad():
+        train_embeddings = (
+            model.encoder(
+                torch.tensor(x_train.drop("ID", axis=1).values, dtype=torch.float32)
+            )
+            if x_train is not None
+            else None
+        )
+        val_embeddings = (
+            model.encoder(
+                torch.tensor(x_val.drop("ID", axis=1).values, dtype=torch.float32)
+            )
+            if x_val is not None
+            else None
+        )
+        test_embeddings = (
+            model.encoder(
+                torch.tensor(x_test.drop("ID", axis=1).values, dtype=torch.float32)
+            )
+            if x_test is not None
+            else None
+        )
+
+    return train_embeddings, val_embeddings, test_embeddings
+
+
+def compare_active_dimensions(
+    train_embeddings=None, val_embeddings=None, test_embeddings=None
+):
+    if train_embeddings is None and val_embeddings is None and test_embeddings is None:
+        return None
+    train_nonzero = (
+        (train_embeddings != 0).sum(dim=1).float()
+        if train_embeddings is not None
+        else None
+    )
+    val_nonzero = (
+        (val_embeddings != 0).sum(dim=1).float() if val_embeddings is not None else None
+    )
+    test_nonzero = (
+        (test_embeddings != 0).sum(dim=1).float()
+        if test_embeddings is not None
+        else None
+    )
+
+    train_mean_active = (
+        train_nonzero.mean().item() if train_nonzero is not None else None
+    )
+    val_mean_active = val_nonzero.mean().item() if val_nonzero is not None else None
+    test_mean_active = test_nonzero.mean().item() if test_nonzero is not None else None
+
+    embed_dim = (
+        train_embeddings.shape[1]
+        if train_embeddings is not None
+        else (
+            val_embeddings.shape[1]
+            if val_embeddings is not None
+            else test_embeddings.shape[1]
+        )
+    )
+
+    print(f"Embedding dimension: {embed_dim}")
+    (
+        print(
+            f"Average active dimensions in train: {train_mean_active:.2f} ({train_mean_active/embed_dim*100:.2f}%)"
+        )
+        if train_mean_active is not None
+        else None
+    )
+    (
+        print(
+            f"Average active dimensions in val: {val_mean_active:.2f} ({val_mean_active/embed_dim*100:.2f}%)"
+        )
+        if val_mean_active is not None
+        else None
+    )
+    (
+        print(
+            f"Average active dimensions in test: {test_mean_active:.2f} ({test_mean_active/embed_dim*100:.2f}%)"
+        )
+        if test_mean_active is not None
+        else None
+    )
+    print("---")
+    (
+        print(f"Max active dimensions in train: {train_nonzero.max().item()}")
+        if train_nonzero is not None
+        else None
+    )
+    (
+        print(f"Max active dimensions in val: {val_nonzero.max().item()}")
+        if val_nonzero is not None
+        else None
+    )
+    (
+        print(f"Max active dimensions in test: {test_nonzero.max().item()}")
+        if test_nonzero is not None
+        else None
+    )
+    plt.figure(figsize=(10, 6))
+
+    if train_nonzero is not None:
+        counts, bins = np.histogram(
+            train_nonzero.cpu().numpy(), bins=int(train_nonzero.max().item())
+        )
+        percentages = counts / counts.sum()
+        plt.bar(
+            bins[:-1],
+            percentages,
+            width=np.diff(bins),
+            alpha=0.5,
+            label="Train",
+            align="edge",
+        )
+
+    if val_nonzero is not None:
+        counts, bins = np.histogram(
+            val_nonzero.cpu().numpy(), bins=int(val_nonzero.max().item())
+        )
+        percentages = counts / counts.sum()
+        plt.bar(
+            bins[:-1],
+            percentages,
+            width=np.diff(bins),
+            alpha=0.3,
+            label="Val",
+            align="edge",
+        )
+
+    if test_nonzero is not None:
+        counts, bins = np.histogram(
+            test_nonzero.cpu().numpy(), bins=int(test_nonzero.max().item())
+        )
+        percentages = counts / counts.sum()
+        plt.bar(
+            bins[:-1],
+            percentages,
+            width=np.diff(bins),
+            alpha=0.5,
+            label="Test",
+            align="edge",
+        )
+
+    plt.xlabel("Number of Active Dimensions")
+    plt.ylabel("Proportion")
+    plt.title("Distribution of Active Dimensions in Embeddings")
+    plt.legend()
+    plt.show()
+
+
+def compute_lambda(p, gamma=10):
+    """
+    Compute lambda for GRL.
+    """
+    return 2 / (1 + np.exp(-gamma * p)) - 1
+
+
 def run_experiment(
     x_source_train,
     y_source_train,
@@ -650,7 +840,10 @@ def run_experiment(
     valsets,
     params=None,
     uda=False,
-    lambda_domain=1.0,
+    uda_hidden_dim=64,
+    uda_dropout_rate=0.0,
+    gamma=10,
+    warmup_epochs=20,
     verbose=False,
     plot_losses=False,
     labels=None,
@@ -662,7 +855,10 @@ def run_experiment(
     valsets: list of (x_val, y_val) tuples for validation.
     params: dictionary of parameters.
     uda: whether to use unsupervised domain adaptation.
-    lambda_domain: weighting factor for domain loss.
+    uda_hidden_dim: hidden dimension for domain discriminator.
+    uda_dropout_rate: dropout rate for domain discriminator.
+    gamma: parameter for lambda annealing in GRL.
+    warmup_epochs: number of epochs to warm up the encoder before domain adaptation.
     verbose: whether to print training progress.
     plot_losses: whether to plot training and validation losses.
     labels: list of labels for validation sets.
@@ -687,6 +883,7 @@ def run_experiment(
                 "patience": 5,
                 "factor": 0.5,
                 "min_lr": 1e-6,
+                "lr_warmup_epochs": 1,
                 "loss": "WeightedRMSELoss",
             },
         }
@@ -705,12 +902,13 @@ def run_experiment(
         # Create domain discriminator with input dim equal to encoder's latent dimension.
         domain_disc = DomainDiscriminator(
             input_dim=model.encoder.embed_dim,
-            hidden_dim=64,
-            dropout_rate=model_params["dropout_rate"],
+            hidden_dim=uda_hidden_dim,
+            dropout_rate=uda_dropout_rate,
         )
         domain_disc.to(device)
         # Create Gradient Reversal Layer (we can set lambda here, though it might be annealed during training)
-        grl = GradientReversal(lambda_=1.0)
+        grl = GradientReversal(lambda_=0.0)
+        grl.to(device)
         # Use separate optimizers for model and domain discriminator.
         optimizer = torch.optim.AdamW(
             model.parameters(),
@@ -724,6 +922,8 @@ def run_experiment(
         )
         # Use binary cross entropy loss for domain classification.
         domain_criterion = nn.BCELoss()
+        if warmup_epochs > 0:
+            total_epochs_uda = training_params["n_epochs"] - warmup_epochs
     else:
         optimizer = torch.optim.AdamW(
             model.parameters(),
@@ -738,6 +938,9 @@ def run_experiment(
         patience=training_params["patience"],
         min_lr=training_params["min_lr"],
     )
+    warmup_scheduler = WarmupScheduler(
+        optimizer, training_params["lr_warmup_epochs"], training_params["lr"]
+    )
 
     if training_params["loss"] == "WeightedRMSELoss":
         criterion = WeightedRMSELoss()
@@ -751,14 +954,68 @@ def run_experiment(
         )
 
     if verbose:
-        print(
-            "Number of trainable parameters:",
-            sum(p.numel() for p in model.parameters() if p.requires_grad),
-        )
+        model_p = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        if uda:
+            disc_p = sum(p.numel() for p in domain_disc.parameters() if p.requires_grad)
+            if hasattr(model, "encoder") and hasattr(model, "head"):
+                encoder_p = sum(
+                    p.numel() for p in model.encoder.parameters() if p.requires_grad
+                )
+                head_p = sum(
+                    p.numel() for p in model.head.parameters() if p.requires_grad
+                )
+                print(
+                    "Number of trainable parameters (encoder + head + domain discriminator):",
+                    encoder_p,
+                    "+",
+                    head_p,
+                    "+",
+                    disc_p,
+                    "=",
+                    encoder_p + head_p + disc_p,
+                )
+            else:
+                print(
+                    "Number of trainable parameters (model + domain discriminator):",
+                    model_p,
+                    "+",
+                    disc_p,
+                    "=",
+                    model_p + disc_p,
+                )
+        else:
+            if hasattr(model, "encoder") and hasattr(model, "head"):
+                encoder_p = sum(
+                    p.numel() for p in model.encoder.parameters() if p.requires_grad
+                )
+                head_p = sum(
+                    p.numel() for p in model.head.parameters() if p.requires_grad
+                )
+                print(
+                    "Number of trainable parameters (encoder + head):",
+                    encoder_p,
+                    "+",
+                    head_p,
+                    "=",
+                    encoder_p + head_p,
+                )
+            else:
+                print(
+                    "Number of trainable parameters:",
+                    model_p,
+                )
 
     # Build source data loader
-    x_source_train = x_source_train.drop("ID", axis=1) if "ID" in x_source_train.columns else x_source_train
-    y_source_train = y_source_train.drop("ID", axis=1) if "ID" in y_source_train.columns else y_source_train
+    x_source_train = (
+        x_source_train.drop("ID", axis=1)
+        if "ID" in x_source_train.columns
+        else x_source_train
+    )
+    y_source_train = (
+        y_source_train.drop("ID", axis=1)
+        if "ID" in y_source_train.columns
+        else y_source_train
+    )
     source_dataset = TensorDataset(
         torch.tensor(x_source_train.values, dtype=torch.float32),
         torch.tensor(y_source_train.values, dtype=torch.float32),
@@ -776,6 +1033,10 @@ def run_experiment(
         target_loader = DataLoader(
             target_dataset, batch_size=training_params["batch_size"], shuffle=True
         )
+        if verbose and warmup_epochs > 0:
+            print(
+                f"Warming up encoder for {warmup_epochs} epochs. No domain adaptation yet."
+            )
 
     # Build validation loaders
     val_loaders = []
@@ -804,9 +1065,16 @@ def run_experiment(
         val_losses_all = [[] for _ in range(len(val_loaders))]
 
     criterion_val = WeightedRMSELoss()
+    epoch_uda = 0
     try:
         for epoch in range(training_params["n_epochs"]):
             if uda:
+                if epoch >= warmup_epochs:
+                    epoch_uda += 1
+                    lambda_ = compute_lambda(epoch_uda / total_epochs_uda, gamma=gamma)
+                    grl.lambda_ = lambda_
+                else:
+                    lambda_ = 0.0
                 train_loss, disc_loss, reg_loss, disc_acc = train_nn_regressor_uda(
                     model,
                     domain_disc,
@@ -817,14 +1085,16 @@ def run_experiment(
                     optimizer_disc,
                     criterion,
                     domain_criterion,
-                    lambda_domain,
                     device,
+                    epoch,
+                    warmup_epochs,
                 )
+                if verbose and epoch == warmup_epochs:
+                    print("Domain adaptation enabled.")
             else:
                 train_loss = train_nn_regressor(
                     model, source_loader, optimizer, criterion, device
                 )
-
             # Track validation losses for all validation sets
             val_losses = []
             for i, val_loader in enumerate(val_loaders):
@@ -835,11 +1105,14 @@ def run_experiment(
                 if plot_losses:
                     val_losses_all[i].append(val_loss)
 
-            # Calculate mean validation loss for scheduler
-            mean_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
+            # Calculate (weighted) mean validation loss (strat_loss * num_samples_in_strat / total_samples for each strat)
+            mean_val_loss = np.mean(val_losses) if val_losses else 0
 
             # Update scheduler with mean validation loss
-            scheduler.step(mean_val_loss)
+            if not warmup_scheduler.is_warmup_done():
+                warmup_scheduler.step()
+            else:
+                scheduler.step(mean_val_loss)
 
             if plot_losses:
                 if uda:
@@ -850,11 +1123,11 @@ def run_experiment(
             if verbose:
                 if uda:
                     pbar.set_description(
-                        f"Epoch {epoch+1}/{training_params['n_epochs']} - Train Disc Acc: {disc_acc*100:.2f}%, Train Disc Loss: {disc_loss:.4f}, Train Reg Loss: {reg_loss:.4f}, Train Loss: {train_loss:.4f}, Val Loss: {mean_val_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
+                        f"Disc Acc: {disc_acc*100:.2f}%, Disc Loss: {disc_loss:.4f}, Lambda: {lambda_:.6f}, Train Reg Loss: {reg_loss:.4f}, Val Loss: {mean_val_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
                     )
                 else:
                     pbar.set_description(
-                        f"Epoch {epoch+1}/{training_params['n_epochs']} - Train Loss: {train_loss:.4f}, Val Loss: {mean_val_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
+                        f"Train Loss: {train_loss:.4f}, Val Loss: {mean_val_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
                     )
                 pbar.update(1)
     except KeyboardInterrupt:

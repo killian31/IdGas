@@ -7,10 +7,8 @@ from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 
 
-from data_preprocessing import splits_to_dataloaders
 from residual_attention_net import RAMTNet
 from uda import GradientReversal, DomainDiscriminator
-from data_preprocessing import full_pipeline
 from utils import write_submissions, WarmupScheduler
 
 
@@ -843,6 +841,8 @@ def run_experiment(
     uda_hidden_dim=64,
     uda_dropout_rate=0.0,
     gamma=10,
+    uda_phase_lr=1e-5,
+    uda_disc_lr=1e-3,
     warmup_epochs=20,
     verbose=False,
     plot_losses=False,
@@ -915,10 +915,9 @@ def run_experiment(
             lr=training_params["lr"],
             weight_decay=training_params["weight_decay"],
         )
-        optimizer_disc = torch.optim.AdamW(
+        optimizer_disc = torch.optim.Adam(
             domain_disc.parameters(),
-            lr=training_params["lr"],
-            weight_decay=training_params["weight_decay"],
+            lr=uda_disc_lr,
         )
         # Use binary cross entropy loss for domain classification.
         domain_criterion = nn.BCELoss()
@@ -1075,6 +1074,11 @@ def run_experiment(
                     grl.lambda_ = lambda_
                 else:
                     lambda_ = 0.0
+                if verbose and epoch == warmup_epochs:
+                    print("Domain adaptation enabled.")
+                    # set learning rate of full model to phase learning rate
+                    for param_group in optimizer.param_groups:
+                        param_group["lr"] = uda_phase_lr
                 train_loss, disc_loss, reg_loss, disc_acc = train_nn_regressor_uda(
                     model,
                     domain_disc,
@@ -1089,8 +1093,6 @@ def run_experiment(
                     epoch,
                     warmup_epochs,
                 )
-                if verbose and epoch == warmup_epochs:
-                    print("Domain adaptation enabled.")
             else:
                 train_loss = train_nn_regressor(
                     model, source_loader, optimizer, criterion, device

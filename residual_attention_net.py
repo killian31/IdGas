@@ -10,6 +10,8 @@ Inputs (13 features)
     │
 [Multi-head Self-Attention Layer + Residual Connection]
     │
+[Fusion Layer]  ← Combining multi-head self-attention outputs
+    │
 [Residual Dense Block 1]  ← FC → BN → ReLU → FC → BN + Skip
     │
 [Residual Dense Block 2]  ← (Optional additional block)

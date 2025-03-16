@@ -272,13 +272,13 @@ def plot_avg_attention_maps(ramtnet, df, batch_size=256, cmap="Oranges"):
         None (Displays heatmaps)
     """
     ramtnet.eval()
-    
+
     # Convert dataframe to tensor (dropping ID column if present)
     if "ID" in df.columns:
         df = df.drop(columns=["ID"])
-    
+
     torch_samples = torch.tensor(df.values, dtype=torch.float32)
-    
+
     num_samples = torch_samples.shape[0]
     attn_weights_sum = None
     attn_counts = 0
@@ -287,39 +287,47 @@ def plot_avg_attention_maps(ramtnet, df, batch_size=256, cmap="Oranges"):
         for i in range(0, num_samples, batch_size):
             effective_batch_size = min(batch_size, num_samples - i)
             batch = torch_samples[i : i + effective_batch_size]
-            
+
             output = ramtnet.encoder.embedder(batch)
             batch_attn_weights = []
 
             for block in ramtnet.encoder.attention_blocks:
                 output, attn_weights = block(output, return_attn=True)
-                batch_attn_weights.append(attn_weights) 
+                batch_attn_weights.append(attn_weights)
 
             if attn_weights_sum is None:
-                attn_weights_sum = [w.sum(dim=0) for w in batch_attn_weights] 
+                attn_weights_sum = [w.sum(dim=0) for w in batch_attn_weights]
             else:
                 for j in range(len(attn_weights_sum)):
                     attn_weights_sum[j] += batch_attn_weights[j].sum(dim=0)
-                    
-            attn_counts += batch.shape[0] 
+
+            attn_counts += batch.shape[0]
             pbar.update(effective_batch_size)
     pbar.close()
 
     attn_avg = [w / attn_counts for w in attn_weights_sum]
 
     num_blocks = len(attn_avg)
-    rows = (num_blocks + 1) // 2  
-    cols = 2 if num_blocks > 1 else 1  
+    rows = (num_blocks + 1) // 2
+    cols = 2 if num_blocks > 1 else 1
     fig, ax = plt.subplots(rows, cols, figsize=(12, 6 * rows))
     ax = ax.flatten() if num_blocks > 1 else [ax]
 
-    feature_names = df.columns  
+    feature_names = df.columns
 
     for i, attn_weights in enumerate(attn_avg):
-        attn_weights = attn_weights.detach().cpu().numpy()  
+        attn_weights = attn_weights.detach().cpu().numpy()
 
-        sns.heatmap(attn_weights, annot=True, fmt=".2f", cbar=True,
-                    xticklabels=feature_names, yticklabels=feature_names, ax=ax[i], cmap=cmap)
+        sns.heatmap(
+            attn_weights,
+            annot=True,
+            fmt=".2f",
+            cbar=True,
+            xticklabels=feature_names,
+            yticklabels=feature_names,
+            ax=ax[i],
+            cmap=cmap,
+        )
         ax[i].set_title(f"Avg Attention Map - Block {i+1}")
 
     plt.tight_layout()

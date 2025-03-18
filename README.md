@@ -1,5 +1,7 @@
 # Toxic Gas Identification
 
+The report can be found [here](./Report.pdf).
+
 ## Residual Attention Multi-Task Network (RAMTNet)
 
 RAMTNet is an advanced neural network designed for toxic gas identification. It

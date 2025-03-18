@@ -310,7 +310,7 @@ def full_pipeline(
         total_count = len(df_x_processed)
 
         # Calculate how many low humidity samples to keep
-        target_low_humidity_count = int(total_count * 0.1)
+        target_low_humidity_count = int(total_count * 0.3)
         samples_to_remove = low_humidity_count - target_low_humidity_count
 
         if samples_to_remove > 0:

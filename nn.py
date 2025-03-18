@@ -498,6 +498,17 @@ class WeightedRMSELoss(nn.Module):
         return loss
 
 
+class WeightedMSELoss(nn.Module):
+    def __init__(self):
+        super(WeightedMSELoss, self).__init__()
+
+    def forward(self, output, target):
+        weights = torch.where(target < 0.5, 1.0, 1.2)
+        squared_errors = weights * (output - target) ** 2
+        loss = torch.mean(squared_errors)
+        return loss
+
+
 class ZeroInflatedWeightedRMSELoss(nn.Module):
     def __init__(self, zero_penalty_factor=2.0):
         super().__init__()
@@ -550,7 +561,10 @@ def evaluate_nn_regressor(model, val_loader, criterion, device):
             output = model(data)
             loss = criterion(output, target)
             val_loss += loss.item()
-    return val_loss / len(val_loader)
+    val_loss /= len(val_loader)
+    if isinstance(criterion, WeightedMSELoss):
+        val_loss = val_loss**0.5
+    return val_loss
 
 
 def train_nn_regressor_uda(
@@ -945,6 +959,8 @@ def run_experiment(
         criterion = WeightedRMSELoss()
     elif training_params["loss"] == "ZeroInflatedWeightedRMSELoss":
         criterion = ZeroInflatedWeightedRMSELoss(zero_penalty_factor=zero_weight)
+    elif training_params["loss"] == "WeightedMSELoss":
+        criterion = WeightedMSELoss()
     elif training_params["loss"] == "MSELoss":
         criterion = nn.MSELoss()
     else:
@@ -1063,7 +1079,7 @@ def run_experiment(
         train_losses = []
         val_losses_all = [[] for _ in range(len(val_loaders))]
 
-    criterion_val = WeightedRMSELoss()
+    criterion_val = WeightedMSELoss()
     epoch_uda = 0
     try:
         for epoch in range(training_params["n_epochs"]):
@@ -1093,10 +1109,15 @@ def run_experiment(
                     epoch,
                     warmup_epochs,
                 )
+                if isinstance(criterion, WeightedMSELoss):
+                    reg_loss = reg_loss**0.5
+                    train_loss = disc_loss + reg_loss
             else:
                 train_loss = train_nn_regressor(
                     model, source_loader, optimizer, criterion, device
                 )
+                if isinstance(criterion, WeightedMSELoss):
+                    train_loss = train_loss**0.5
             # Track validation losses for all validation sets
             val_losses = []
             for i, val_loader in enumerate(val_loaders):

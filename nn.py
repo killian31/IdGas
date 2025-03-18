@@ -872,6 +872,8 @@ def run_experiment(
     uda_hidden_dim: hidden dimension for domain discriminator.
     uda_dropout_rate: dropout rate for domain discriminator.
     gamma: parameter for lambda annealing in GRL.
+    uda_phase_lr: learning rate for the encoder during domain adaptation phase.
+    uda_disc_lr: learning rate for the domain discriminator.
     warmup_epochs: number of epochs to warm up the encoder before domain adaptation.
     verbose: whether to print training progress.
     plot_losses: whether to plot training and validation losses.
